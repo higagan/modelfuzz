@@ -1,6 +1,6 @@
 # AgentShield
 
-[![CI](https://img.shields.io/github/actions/workflow/status/higagan/agentshield/ci.yml?branch=main&label=CI)](https://github.com/higagan/agentshield/actions/workflows/ci.yml)
+[![CI](https://github.com/higagan/agentshield/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/higagan/agentshield/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-261230.svg)](https://github.com/astral-sh/ruff)
