@@ -1,6 +1,6 @@
 [project]
 name = "modelfuzz"
-version = "0.1.0"
+version = "0.1.2"
 description = "Runtime guardrails for AI agents."
 readme = "README.md"
 license = { text = "MIT" }
