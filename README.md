@@ -27,6 +27,8 @@ def send_email(to_address: str, subject: str, body: str) -> None:
     smtp.send(to_address, subject, body)
 ```
 
+> **Note:** When used bare, `@shield_tool` applies a default `PolicyEngine` that blocks common secrets (API keys, passwords). To define custom rules (like `URLAllowList`), simply pass your own engine: `@shield_tool(engine=my_engine)`.
+
 Works bare (`@shield_tool`) or called (`@shield_tool()`) — both wrap `send_email` identically. Any argument that trips a policy raises `ModelFuzzBlockError` before the function body runs.
 
 ## The Demo
