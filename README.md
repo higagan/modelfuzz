@@ -65,3 +65,12 @@ uv add modelfuzz
 ## Contributing
 
 Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull-request guidelines.
+
+## Analytics
+
+This README includes an anonymous [Scarf](https://scarf.sh) pixel to help gauge project reach (README/page views). No personal data is collected.
+
+<!-- Analytics -->
+<p align="center">
+  <img src="https://static.scarf.sh/a.png?x-pxid=9fad51a1-f9db-4542-855d-119394c41db2" alt="Scarf Analytics" width="1" height="1" />
+</p>
