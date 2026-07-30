@@ -6,7 +6,7 @@ import typer
 
 from modelfuzz import __version__
 
-app = typer.Typer(help="Runtime guardrails for AI agents.")
+app = typer.Typer(help="Runtime guardrails for AI agents.", invoke_without_command=True)
 
 # --- ANSI Color Codes ---
 RED = "\033[91m"
@@ -135,9 +135,27 @@ def _truncate(text: str, limit: int = 140) -> str:
     return collapsed[: limit - 1] + "…"
 
 
+def _version_callback(value: bool) -> None:
+    """Print the installed version for the eager ``--version`` option."""
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
 @app.callback()
-def cli() -> None:
+def cli(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Print the installed ModelFuzz version and exit.",
+    ),
+) -> None:
     """Runtime guardrails for AI agents."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
 
 
 @app.command()
