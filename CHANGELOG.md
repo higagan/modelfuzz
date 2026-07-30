@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- fix: `modelfuzz scan` now exits non-zero on findings, so it can gate CI the way bandit/semgrep/trivy/gitleaks do. Previously it always exited 0, even when every seed broke through. Exit codes: `0` no vulnerabilities within budget, `1` at least one seed broke through, `2` inconclusive (every probe errored or none ran)
+- docs: document the `scan` exit codes in the Red-Team Scanner README section
+
 ## [0.3.3] - 2026-07-30
 
 - docs: state plainly what the default `SensitiveDataFilter` does. It matches keywords; it is not a secret-detection engine, and the Quickstart no longer implies otherwise

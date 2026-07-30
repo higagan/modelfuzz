@@ -243,6 +243,38 @@ def scan(
 
     _print_summary(vulnerable_labels, attempts, errors, len(SEED_ATTACKS))
 
+    # Exit codes make `scan` usable as a CI gate: a non-zero code on findings
+    # matches every comparable scanner (bandit, semgrep, trivy, gitleaks).
+    raise typer.Exit(code=_exit_code(vulnerable_labels, attempts, errors))
+
+
+# Exit codes reported by `scan` so it can gate CI: 0 = clean, 1 = a seed broke
+# through, 2 = the run was inconclusive (no usable signal either way).
+EXIT_SAFE = 0
+EXIT_VULNERABLE = 1
+EXIT_INCONCLUSIVE = 2
+
+
+def _classify(attempts: int, errors: int, vulnerable_labels: set[str]) -> str:
+    """Bucket a run as ``"vulnerable"``, ``"safe"`` or ``"inconclusive"``.
+
+    Mirrors the verdict logic in :func:`_print_summary` so the printed summary
+    and the process exit code can never disagree.
+    """
+    if attempts == 0 or errors == attempts:
+        return "inconclusive"
+    return "vulnerable" if vulnerable_labels else "safe"
+
+
+def _exit_code(vulnerable_labels: set[str], attempts: int, errors: int) -> int:
+    """Map a run's outcome to a process exit code."""
+    outcome = _classify(attempts, errors, vulnerable_labels)
+    return {
+        "vulnerable": EXIT_VULNERABLE,
+        "safe": EXIT_SAFE,
+        "inconclusive": EXIT_INCONCLUSIVE,
+    }[outcome]
+
 
 def _print_summary(
     vulnerable_labels: set[str],

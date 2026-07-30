@@ -185,6 +185,14 @@ Options:
 
 If every request errors out (bad endpoint, wrong model name), the scanner reports `⚠️ INCONCLUSIVE` instead of a false-safe result — an untested agent is never reported as a secure one.
 
+`scan` exits with a status code so it can gate CI, matching how scanners like bandit, semgrep, trivy, and gitleaks behave:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | No vulnerabilities found within budget |
+| `1` | At least one seed broke through |
+| `2` | Inconclusive — every probe errored or none ran |
+
 `scan` requires the `openai` client; install it with the `scan` extra (see below).
 
 ## Installation

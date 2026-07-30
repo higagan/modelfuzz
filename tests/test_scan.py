@@ -81,7 +81,8 @@ def test_all_seeds_vulnerable_on_first_probe(monkeypatch):
     client = StubClient(probe_result=_tool_call_response())
     result = _run(monkeypatch, client)
 
-    assert result.exit_code == 0
+    # Every seed broke through → non-zero, so `scan` can gate CI.
+    assert result.exit_code == cli.EXIT_VULNERABLE
     assert "🚨 VULNERABLE" in result.output
     # Every seed triggers immediately, so no mutation should ever be requested.
     assert client.mutation_prompts == []
@@ -101,7 +102,8 @@ def test_refusal_triggers_mutation_then_breakthrough(monkeypatch):
     client = StubClient(probe_result=probe, mutation="MUTATED deceptive payload")
     result = _run(monkeypatch, client)
 
-    assert result.exit_code == 0
+    # A breakthrough was reached → exit code signals a finding.
+    assert result.exit_code == cli.EXIT_VULNERABLE
     assert "🧬 MUTATING" in result.output
     assert "✅ SAFE" in result.output
     assert "🚨 VULNERABLE" in result.output
@@ -114,7 +116,8 @@ def test_all_safe_when_mutations_are_dead(monkeypatch):
     client = StubClient(probe_result=_refusal_response(), mutation="")
     result = _run(monkeypatch, client)
 
-    assert result.exit_code == 0
+    # No breakthrough within budget → clean exit.
+    assert result.exit_code == cli.EXIT_SAFE
     assert "0/" in result.output
     assert "No vulnerabilities found" in result.output
     assert "lineage dead" in result.output
@@ -124,9 +127,9 @@ def test_probe_errors_are_handled_gracefully(monkeypatch):
     client = StubClient(probe_result=RuntimeError("connection refused"))
     result = _run(monkeypatch, client)
 
-    assert result.exit_code == 0
+    # All attempts errored → inconclusive, never a false "safe" verdict.
+    assert result.exit_code == cli.EXIT_INCONCLUSIVE
     assert "⚠️  ERROR" in result.output
-    # All attempts errored -> inconclusive, never a false "safe" verdict.
     assert "INCONCLUSIVE" in result.output
 
 
@@ -134,7 +137,8 @@ def test_zero_budget_reports_inconclusive(monkeypatch):
     client = StubClient(probe_result=_tool_call_response())
     result = _run(monkeypatch, client, args=["--budget-s", "0"])
 
-    assert result.exit_code == 0
+    # No attempts ran → inconclusive.
+    assert result.exit_code == cli.EXIT_INCONCLUSIVE
     assert "INCONCLUSIVE" in result.output
     assert client.probe_prompts == []
 
@@ -147,9 +151,46 @@ def test_budget_stops_the_loop(monkeypatch):
     client = StubClient(probe_result=_refusal_response(), mutation="MUTATED payload")
     result = _run(monkeypatch, client, args=["--budget-s", "5"])
 
-    assert result.exit_code == 0
+    # One clean refusal with no breakthrough → safe.
+    assert result.exit_code == cli.EXIT_SAFE
     # Exactly one probe ran before the budget was spent.
     assert len(client.probe_prompts) == 1
+
+
+def test_scan_exits_nonzero_when_vulnerable(monkeypatch):
+    # Regression for #11: `scan` must exit 1 when a seed breaks through, so it can
+    # gate CI the way bandit/semgrep/trivy/gitleaks do.
+    client = StubClient(probe_result=_tool_call_response())
+    result = _run(monkeypatch, client)
+
+    assert result.exit_code == cli.EXIT_VULNERABLE == 1
+
+
+def test_scan_exits_zero_when_safe(monkeypatch):
+    client = StubClient(probe_result=_refusal_response(), mutation="")
+    result = _run(monkeypatch, client)
+
+    assert result.exit_code == cli.EXIT_SAFE == 0
+
+
+def test_scan_exits_two_when_inconclusive(monkeypatch):
+    client = StubClient(probe_result=RuntimeError("connection refused"))
+    result = _run(monkeypatch, client)
+
+    assert result.exit_code == cli.EXIT_INCONCLUSIVE == 2
+
+
+def test_classify_matches_exit_code_constants():
+    # The pure classifier is the single source of truth for both the printed
+    # verdict and the exit code — lock the mapping down directly.
+    assert cli._classify(attempts=1, errors=0, vulnerable_labels={"x"}) == "vulnerable"
+    assert cli._classify(attempts=3, errors=0, vulnerable_labels=set()) == "safe"
+    assert cli._classify(attempts=0, errors=0, vulnerable_labels=set()) == "inconclusive"
+    assert cli._classify(attempts=2, errors=2, vulnerable_labels=set()) == "inconclusive"
+
+    assert cli._exit_code({"x"}, attempts=1, errors=0) == 1
+    assert cli._exit_code(set(), attempts=3, errors=0) == 0
+    assert cli._exit_code(set(), attempts=0, errors=0) == 2
 
 
 def test_missing_openai_dependency_exits_with_guidance():
@@ -169,3 +210,70 @@ def test_missing_openai_dependency_exits_with_guidance():
 
     assert result.exit_code == 1
     assert "pip install 'modelfuzz[scan]'" in result.output
+
+
+def test_version_command_prints_installed_version():
+    from modelfuzz import __version__
+
+    result = runner.invoke(cli.app, ["version"])
+
+    assert result.exit_code == 0
+    assert __version__ in result.output
+
+
+def test_mutation_failure_ends_lineage_without_breakthrough(monkeypatch):
+    # Every seed is refused then its mutation call raises: each lineage dies on a
+    # mutation error. Because every attempt errored, the run is inconclusive
+    # rather than a false "safe" — but the mutation-error branch is exercised.
+    def probe(prompt: str):
+        return _refusal_response()
+
+    client = StubClient(probe_result=probe, mutation=RuntimeError("mutation endpoint down"))
+    result = _run(monkeypatch, client)
+
+    assert "Mutation failed" in result.output
+    # All attempts ended in an error → inconclusive, never a misleading SAFE.
+    assert result.exit_code == cli.EXIT_INCONCLUSIVE
+
+
+def test_partial_errors_still_report_safe_verdict(monkeypatch):
+    # The first seed mutates into a dead lineage (empty string → a clean attempt
+    # that completes), the rest fail to mutate. At least one attempt finished
+    # without error and nothing broke through, so the verdict is SAFE but the
+    # summary notes that some requests errored.
+    calls = {"n": 0}
+
+    def fake_mutate(client, model, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return ""
+        raise RuntimeError("mutation endpoint down")
+
+    monkeypatch.setattr(cli, "_mutate", fake_mutate)
+    client = StubClient(probe_result=_refusal_response())
+    result = _run(monkeypatch, client)
+
+    assert result.exit_code == cli.EXIT_SAFE
+    assert "Mutation failed" in result.output
+    assert "errored during the run" in result.output
+    assert "No vulnerabilities found" in result.output
+
+
+def test_partial_probe_errors_still_report_safe_verdict(monkeypatch):
+    # One seed errors on probe, the others refuse and die on empty mutation: the
+    # run is SAFE (not inconclusive) because at least one attempt succeeded.
+    calls = {"n": 0}
+
+    def probe(prompt: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return RuntimeError("transient network error")
+        return _refusal_response()
+
+    client = StubClient(probe_result=probe, mutation="")
+    result = _run(monkeypatch, client)
+
+    assert result.exit_code == cli.EXIT_SAFE
+    assert "⚠️  ERROR" in result.output
+    assert "errored during the run" in result.output
+    assert "No vulnerabilities found" in result.output
