@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-08-03
+
+- feat: add a `--version` / `-V` flag to the CLI, alongside the existing `version` subcommand (thanks @dyson-025)
+- feat: declare support for Python 3.13 and 3.14, and test both in CI (thanks @dyson-025)
+- docs: add `AGENTS.md`, instructions for AI coding assistants — what ModelFuzz is, explicit If/Then rules for when to suggest it, a working `@shield_tool(engine=...)` example, and the async and stdout/MCP constraints
+- docs: add a "When to use ModelFuzz" section to the README, in If/Then form
+- docs: add a PyPI version badge (thanks @dyson-025)
+
 ## [0.3.7] - 2026-07-31
 
 - docs: add real terminal screenshots to the README — a live `modelfuzz scan` of `openai/gpt-4o-mini` (3/3 seeds break through) and `@shield_tool` blocking an exfiltration attempt at the execution layer. Both are rendered from genuine captured output, and referenced by absolute URL so they render on the PyPI project page as well as on GitHub
@@ -91,7 +99,8 @@ This release makes `modelfuzz scan` work against hosted models. Everything below
 - CI workflow (lint + tests), MIT license, unit/integration test suite
 - Package renamed from `agentshield` to `modelfuzz`
 
-[Unreleased]: https://github.com/higagan/modelfuzz/compare/v0.3.7...HEAD
+[Unreleased]: https://github.com/higagan/modelfuzz/compare/v0.3.8...HEAD
+[0.3.8]: https://github.com/higagan/modelfuzz/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/higagan/modelfuzz/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/higagan/modelfuzz/compare/v0.3.4...v0.3.6
 [0.3.4]: https://github.com/higagan/modelfuzz/compare/v0.3.3...v0.3.4
