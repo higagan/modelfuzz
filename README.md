@@ -131,7 +131,7 @@ Output:
 
 ## Limitations
 
-ModelFuzz provides the interception point, the policy protocol, and an adaptive fuzzer. The default `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key` — it does not recognise credential formats, so a real `sk-…` or `AKIA…` key will pass through it. Treat it as a demo default and write policies for your own threat model. Also: policies see each argument in isolation, not the whole call, and only `str`, `list`, `tuple`, and `dict` values are inspected.
+ModelFuzz provides the interception point, the policy protocol, and an adaptive fuzzer. The default `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key` — it does not recognise credential formats, so a real `sk-…` or `AKIA…` key will pass through it. Treat it as a demo default and write policies for your own threat model. Also: policies see each argument in isolation, not the whole call, and Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.
 
 ## Roadmap
 

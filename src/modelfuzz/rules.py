@@ -157,14 +157,24 @@ class SensitiveDataFilter:
             if id(data) in seen:
                 return None
             seen.add(id(data))
-            for value in data.values():
+
+            for key, value in data.items():
+                violation = self._check_recursive(key, seen)
+                if violation:
+                    return violation
+
                 violation = self._check_recursive(value, seen)
                 if violation:
                     return violation
-        elif isinstance(data, (list, tuple)):
+
+        elif isinstance(data, (bytes, bytearray)):
+            return self._check_recursive(data.decode("utf-8", errors="ignore"), seen)
+
+        elif isinstance(data, (list, tuple, set, frozenset)):
             if id(data) in seen:
                 return None
             seen.add(id(data))
+
             for item in data:
                 violation = self._check_recursive(item, seen)
                 if violation:

@@ -247,6 +247,36 @@ class TestSensitiveDataFilter:
         violation = filter(data)
         assert violation is None
 
+    def test_blocks_sensitive_dict_key(self, filter: SensitiveDataFilter):
+        """Ensure it blocks sensitive keywords in dictionary keys."""
+        violation = filter({"api_key": "abc123"})
+        assert violation is not None
+        assert "api_key" in violation.reason
+
+    def test_blocks_sensitive_bytes(self, filter: SensitiveDataFilter):
+        """Ensure bytes are inspected."""
+        violation = filter(b"contains password")
+        assert violation is not None
+        assert "password" in violation.reason
+
+    def test_blocks_sensitive_bytearray(self, filter: SensitiveDataFilter):
+        """Ensure bytearrays are inspected."""
+        violation = filter(bytearray(b"contains api_key"))
+        assert violation is not None
+        assert "api_key" in violation.reason
+
+    def test_blocks_sensitive_set(self, filter: SensitiveDataFilter):
+        """Ensure sets are inspected."""
+        violation = filter({"contains secret"})
+        assert violation is not None
+        assert "secret" in violation.reason
+
+    def test_blocks_sensitive_frozenset(self, filter: SensitiveDataFilter):
+        """Ensure frozensets are inspected."""
+        violation = filter(frozenset({"contains password"}))
+        assert violation is not None
+        assert "password" in violation.reason
+
     def test_survives_a_self_referential_dict(self, filter: SensitiveDataFilter):
         """A cyclic dict must not blow the stack."""
         data: dict = {"name": "clean"}
