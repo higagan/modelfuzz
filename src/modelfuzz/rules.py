@@ -142,9 +142,9 @@ class SensitiveDataFilter:
         Returns:
             A Violation object if sensitive data is found, otherwise None.
         """
-        return self._check_recursive(data)
+        return self._check_recursive(data, set())
 
-    def _check_recursive(self, data: object) -> Violation | None:
+    def _check_recursive(self, data: object, seen: set[int]) -> Violation | None:
         if isinstance(data, str):
             lower_data = data.lower()
             for keyword in self.sensitive_keywords:
@@ -154,13 +154,19 @@ class SensitiveDataFilter:
                         reason=f"String contains sensitive keyword: '{keyword}'",
                     )
         elif isinstance(data, dict):
+            if id(data) in seen:
+                return None
+            seen.add(id(data))
             for value in data.values():
-                violation = self._check_recursive(value)
+                violation = self._check_recursive(value, seen)
                 if violation:
                     return violation
         elif isinstance(data, (list, tuple)):
+            if id(data) in seen:
+                return None
+            seen.add(id(data))
             for item in data:
-                violation = self._check_recursive(item)
+                violation = self._check_recursive(item, seen)
                 if violation:
                     return violation
 

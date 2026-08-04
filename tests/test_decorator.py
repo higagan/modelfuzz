@@ -120,7 +120,6 @@ class TestAsyncTools:
     def test_wrapped_coroutine_is_still_a_coroutine_function(self):
         """Frameworks branch on this to decide whether to await."""
         assert inspect.iscoroutinefunction(fetch_url)
-        assert asyncio.iscoroutinefunction(fetch_url)
 
     def test_async_safe_call_returns_the_real_value(self):
         """An awaited safe call returns the tool's value, not a coroutine."""

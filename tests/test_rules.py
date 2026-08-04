@@ -246,3 +246,23 @@ class TestSensitiveDataFilter:
         data = {"user": "alice", "action": "login"}
         violation = filter(data)
         assert violation is None
+
+    def test_survives_a_self_referential_dict(self, filter: SensitiveDataFilter):
+        """A cyclic dict must not blow the stack."""
+        data: dict = {"name": "clean"}
+        data["self"] = data
+        assert filter(data) is None
+
+    def test_survives_a_self_referential_list(self, filter: SensitiveDataFilter):
+        """A cyclic list must not blow the stack."""
+        data: list = ["clean"]
+        data.append(data)
+        assert filter(data) is None
+
+    def test_blocks_sensitive_keyword_inside_a_cycle(self, filter: SensitiveDataFilter):
+        """A cycle that contains a sensitive keyword is still caught."""
+        data: dict = {"note": "the secret is out"}
+        data["self"] = data
+        violation = filter(data)
+        assert violation is not None
+        assert "secret" in violation.reason
