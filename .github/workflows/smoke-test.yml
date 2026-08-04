@@ -96,12 +96,9 @@ jobs:
       - name: Verify py.typed ships in wheel
         run: |
           python -c "
-          import zipfile, modelfuzz, pathlib
-          wheel = next(pathlib.Path(modelfuzz.__path__[0]).parent.glob('modelfuzz-*.dist-info/../..'))
-          # Find the wheel via pip show
-          import subprocess, json
-          loc = subprocess.check_output(['pip', 'show', '-f', 'modelfuzz'], text=True)
-          assert 'py.typed' in loc, 'py.typed not found in installed files'
+          import pathlib, modelfuzz
+          marker = pathlib.Path(modelfuzz.__path__[0]) / 'py.typed'
+          assert marker.exists(), f'py.typed not found at {marker}'
           print('py.typed: present')
           "
 
