@@ -1,0 +1,123 @@
+name: Post-publish smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to smoke-test (e.g. 0.3.8). Defaults to latest on PyPI."
+        required: false
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install from PyPI
+        run: |
+          pip install --upgrade pip
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            pip install modelfuzz==${{ github.event.inputs.version }}
+          else
+            pip install modelfuzz
+          fi
+
+      - name: Verify version and imports
+        run: |
+          python -c "
+          import modelfuzz
+          print(f'installed: {modelfuzz.__version__}')
+          from modelfuzz import (
+              PolicyEngine, URLAllowList, SensitiveDataFilter,
+              shield_tool, ModelFuzzBlockError,
+          )
+          print('imports: OK')
+          "
+
+      - name: Smoke test — shield, async, CLI
+        run: |
+          python -c "
+          from modelfuzz import PolicyEngine, URLAllowList, shield_tool, ModelFuzzBlockError
+          import asyncio, subprocess, modelfuzz
+
+          # --- Shield: URLAllowList ---
+          engine = PolicyEngine([URLAllowList(allowed_domains=['api.mycompany.com'])])
+
+          @shield_tool(engine=engine)
+          def http_post(url, body):
+              return f'POST {url}'
+
+          assert http_post('https://api.mycompany.com/v1', 'hi') == 'POST https://api.mycompany.com/v1'
+
+          try:
+              http_post('http://evil.com', 'data')
+              raise AssertionError('should have blocked')
+          except ModelFuzzBlockError:
+              pass
+
+          # --- Shield: default keyword filter ---
+          @shield_tool
+          def send_email(to, subject, body):
+              return f'sent to {to}'
+
+          assert send_email('alice@example.com', 'Hello', 'Hi Alice') == 'sent to alice@example.com'
+
+          try:
+              send_email('x@evil.com', 'x', 'the secret password')
+              raise AssertionError('should have blocked')
+          except ModelFuzzBlockError:
+              pass
+
+          # --- Async ---
+          @shield_tool(engine=engine)
+          async def fetch(url):
+              return f'fetched {url}'
+
+          assert asyncio.run(fetch('https://api.mycompany.com/x')) == 'fetched https://api.mycompany.com/x'
+
+          try:
+              asyncio.run(fetch('http://evil.com'))
+              raise AssertionError('should have blocked')
+          except ModelFuzzBlockError:
+              pass
+
+          # --- CLI ---
+          out = subprocess.check_output(['modelfuzz', '--version'], text=True).strip()
+          assert out == modelfuzz.__version__, f'CLI said {out}, package said {modelfuzz.__version__}'
+
+          print('smoke test: OK')
+          "
+
+      - name: Verify py.typed ships in wheel
+        run: |
+          python -c "
+          import zipfile, modelfuzz, pathlib
+          wheel = next(pathlib.Path(modelfuzz.__path__[0]).parent.glob('modelfuzz-*.dist-info/../..'))
+          # Find the wheel via pip show
+          import subprocess, json
+          loc = subprocess.check_output(['pip', 'show', '-f', 'modelfuzz'], text=True)
+          assert 'py.typed' in loc, 'py.typed not found in installed files'
+          print('py.typed: present')
+          "
+
+      - name: Verify sdist is clean
+        run: |
+          pip download modelfuzz --no-deps --no-binary :all: -d /tmp/sdist
+          python -c "
+          import glob, tarfile
+          tars = glob.glob('/tmp/sdist/modelfuzz-*.tar.gz')
+          assert len(tars) == 1, f'expected 1 sdist, found {len(tars)}'
+          with tarfile.open(tars[0]) as tf:
+              names = tf.getnames()
+          forbidden = ['.claude', '.env', 'settings.local', '__pycache__', '.DS_Store']
+          for bad in forbidden:
+              assert not any(bad in n for n in names), f'forbidden path in sdist: {bad}'
+          assert any('py.typed' in n for n in names), 'py.typed missing from sdist'
+          assert any('AGENTS.md' in n for n in names), 'AGENTS.md missing from sdist'
+          print(f'sdist: clean ({len(names)} files)')
+          "
