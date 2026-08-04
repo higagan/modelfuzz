@@ -32,5 +32,8 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
 
+      - name: Type check
+        run: uv run mypy --strict src/modelfuzz
+
       - name: Test
         run: uv run pytest
