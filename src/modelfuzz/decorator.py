@@ -4,7 +4,7 @@ import functools
 import inspect
 import logging
 from collections.abc import Callable
-from typing import ParamSpec, TypeVar, overload
+from typing import Any, ParamSpec, TypeVar, overload
 
 from modelfuzz.engine import PolicyEngine
 from modelfuzz.exceptions import ModelFuzzBlockError
@@ -16,8 +16,7 @@ R = TypeVar("R")
 logger = logging.getLogger("modelfuzz")
 
 # Default policy engine for the decorator
-default_policies = [SensitiveDataFilter()]
-_default_engine = PolicyEngine(default_policies)
+_default_engine = PolicyEngine([SensitiveDataFilter()])
 
 
 @overload
@@ -28,7 +27,9 @@ def shield_tool(
 ) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
 
 
-def shield_tool(engine=None):
+def shield_tool(
+    engine: Callable[P, R] | PolicyEngine | None = None,
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Wrap a tool function so every call is intercepted before execution.
 
     Usable bare (``@shield_tool``) or called (``@shield_tool()`` /
@@ -55,7 +56,12 @@ def shield_tool(engine=None):
     return decorator
 
 
-def _enforce(func: Callable[..., object], actual_engine: PolicyEngine, args, kwargs) -> None:
+def _enforce(
+    func: Callable[..., object],
+    actual_engine: PolicyEngine,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> None:
     """Check every argument against the engine, raising on the first violation.
 
     Blocks are logged at WARNING with structured fields so they reach the host
@@ -88,17 +94,18 @@ def _wrap(func: Callable[P, R], actual_engine: PolicyEngine) -> Callable[P, R]:
     if inspect.iscoroutinefunction(func):
 
         @functools.wraps(func)
-        async def async_wrapper(*args: P.args, **kwargs: P.kwargs):
+        async def async_wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             _enforce(func, actual_engine, args, kwargs)
             logger.debug("ModelFuzz intercepted: %s", func.__name__)
-            return await func(*args, **kwargs)
+            result: R = await func(*args, **kwargs)
+            return result
 
-        return async_wrapper
+        return async_wrapper  # type: ignore[return-value]  # coroutine vs R
 
     if inspect.isasyncgenfunction(func):
 
         @functools.wraps(func)
-        async def asyncgen_wrapper(*args: P.args, **kwargs: P.kwargs):
+        async def asyncgen_wrapper(*args: P.args, **kwargs: P.kwargs) -> Any:
             _enforce(func, actual_engine, args, kwargs)
             logger.debug("ModelFuzz intercepted: %s", func.__name__)
             async for item in func(*args, **kwargs):

@@ -21,6 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.10"
 dependencies = [
@@ -44,6 +45,7 @@ Issues = "https://github.com/higagan/modelfuzz/issues"
 dev = [
     "pytest>=8.0",
     "ruff>=0.12",
+    "mypy>=1.13",
     "pre-commit>=4.0",
 ]
 
@@ -60,6 +62,7 @@ packages = ["src/modelfuzz"]
 [tool.hatch.build.targets.sdist]
 include = [
     "src/modelfuzz",
+    "src/modelfuzz/py.typed",
     "tests",
     "demo.py",
     "defense_demo.py",

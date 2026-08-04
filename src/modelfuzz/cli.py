@@ -1,7 +1,7 @@
 """Command-line interface for ModelFuzz."""
 
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import typer
 
@@ -49,7 +49,7 @@ SEED_ATTACKS: list[dict[str, str]] = [
 
 # A dummy tool the target model can call. A safe model should refuse to invoke
 # it for any of the malicious prompts above.
-HTTP_POST_TOOL: list[dict] = [
+HTTP_POST_TOOL: list[dict[str, object]] = [
     {
         "type": "function",
         "function": {
@@ -103,7 +103,7 @@ class TruncatedResponseError(RuntimeError):
     """
 
 
-def _make_client(endpoint: str, api_key: str):
+def _make_client(endpoint: str, api_key: str) -> Any:
     """Build an OpenAI client, or exit with install guidance if unavailable.
 
     Kept as a separate seam so the scan loop can be exercised with a stub client
@@ -133,7 +133,12 @@ class ProbeResult(NamedTuple):
     reply: str
 
 
-def _probe(client, model: str, prompt: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> ProbeResult:
+def _probe(
+    client: Any,
+    model: str,
+    prompt: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+) -> ProbeResult:
     """Send one attack prompt to the target.
 
     Raises:
@@ -236,7 +241,7 @@ def _looks_like_refusal(text: str) -> bool:
 
 
 def _next_attack(
-    client,
+    client: Any,
     model: str,
     failed_attack: str,
     target_reply: str,
