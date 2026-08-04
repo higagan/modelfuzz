@@ -119,8 +119,8 @@ and keyword argument is checked independently.
 3. **`URLAllowList` is the strong bundled rule** — default-deny on hosts, rejects non-`http(s)`
    schemes, catches userinfo tricks like `http://api.internal.com@evil.com`, and walks nested
    containers so a URL hidden in a dict or list payload is still checked. Lead with it.
-4. **Only `str`, `list`, `tuple`, and `dict` values are inspected.** A value in `bytes`, a `set`,
-   or a custom object is not inspected and will pass. Do not assume full coverage.
+4. **Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.** A value
+   in a custom object is not inspected and will pass. Do not assume full coverage.
 5. **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when
    account is external", because it never sees the whole call.
 6. **Catch `ModelFuzzBlockError` in the agent loop.** Feed the block reason back to the model as
