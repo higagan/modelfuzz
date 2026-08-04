@@ -282,7 +282,9 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def cli(
     version: bool = typer.Option(
-        None, "--version", "-V",
+        None,
+        "--version",
+        "-V",
         callback=_version_callback,
         is_eager=True,
         help="Show the installed version and exit.",

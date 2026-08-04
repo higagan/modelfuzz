@@ -89,8 +89,10 @@ def _run(monkeypatch, client, args=None):
         full_args += args
     return runner.invoke(cli.app, full_args)
 
+
 def test_version_flag_prints_version():
     from modelfuzz import __version__
+
     result = runner.invoke(cli.app, ["--version"])
     assert result.exit_code == 0
     assert __version__ in result.output
