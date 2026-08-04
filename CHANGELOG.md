@@ -4,10 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
-## [0.3.8] - 2026-08-03
+## [0.3.8] - 2026-08-04
 
 - feat: add a `--version` / `-V` flag to the CLI, alongside the existing `version` subcommand (thanks @dyson-025)
 - feat: declare support for Python 3.13 and 3.14, and test both in CI (thanks @dyson-025)
+- fix: `SensitiveDataFilter` now inspects dictionary keys, `bytes`/`bytearray` (decoded as UTF-8), and `set`/`frozenset` — previously these carriers were not checked and sensitive data in them passed through (thanks @dyson-025)
+- fix: `SensitiveDataFilter` no longer raises `RecursionError` on self-referential containers — a `seen` set of `id()` values is threaded through the walk, mirroring `URLAllowList`
+- ci: enforce `ruff format --check` in CI so formatting drift fails the workflow, not just `ruff check`
 - docs: add `AGENTS.md`, instructions for AI coding assistants — what ModelFuzz is, explicit If/Then rules for when to suggest it, a working `@shield_tool(engine=...)` example, and the async and stdout/MCP constraints
 - docs: add a "When to use ModelFuzz" section to the README, in If/Then form
 - docs: add a PyPI version badge (thanks @dyson-025)
