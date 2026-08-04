@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-08-04
+
+- feat: ship `py.typed` (PEP 561) so type checkers and AI coding assistants see real signatures instead of `Any` — `decorator.py`'s `ParamSpec`/`TypeVar`/`@overload` work now reaches consumers
+- feat: add `Typing :: Typed` classifier to package metadata
+- ci: enforce `mypy --strict src/modelfuzz` in CI so type regressions fail the workflow
+- ci: add post-publish smoke test workflow that installs from PyPI and verifies the published artifact (shield, async, CLI, `py.typed`, sdist cleanliness) — triggers on tag push or manual dispatch
+- test: add E2E integration tests for the core user journey (shield + scanner) that run in CI alongside unit tests
+- docs: rework the README top section — runnable `URLAllowList` quickstart, unified `demo.py` payload, real adaptive-fuzz scanner transcript, expanded Limitations, async and error-handling examples
+- docs: add `.cursorrules`, `.github/copilot-instructions.md`, `CLAUDE.md` as thin pointers to `AGENTS.md`
+- docs: sync `AGENTS.md` rule 4 with the expanded `SensitiveDataFilter` coverage
+
 ## [0.3.8] - 2026-08-04
 
 - feat: add a `--version` / `-V` flag to the CLI, alongside the existing `version` subcommand (thanks @dyson-025)
@@ -102,7 +113,8 @@ This release makes `modelfuzz scan` work against hosted models. Everything below
 - CI workflow (lint + tests), MIT license, unit/integration test suite
 - Package renamed from `agentshield` to `modelfuzz`
 
-[Unreleased]: https://github.com/higagan/modelfuzz/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/higagan/modelfuzz/compare/v0.3.9...HEAD
+[0.3.9]: https://github.com/higagan/modelfuzz/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/higagan/modelfuzz/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/higagan/modelfuzz/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/higagan/modelfuzz/compare/v0.3.4...v0.3.6
