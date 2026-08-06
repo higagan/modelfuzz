@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- feat: `scan` gains `--attacker-model`, `--attacker-endpoint`, and `--attacker-api-key`, decoupling payload mutation from the target model (defaults to the target for backwards compatibility). Previously the attacker call always used the target model, so an aligned target refused to author an injection against itself and every lineage died at generation 1 — the adaptive fuzzer never adapted against exactly the models worth testing. Fixes #35
+- docs: qualify the README's "may still fall to a later mutation" claim — that only holds when `--attacker-model` points at a model willing to author an injection; with the default (attacker == target), an aligned target's refusal to attack itself is the more common outcome
+
 ## [0.3.9] - 2026-08-04
 
 - feat: ship `py.typed` (PEP 561) so type checkers and AI coding assistants see real signatures instead of `Any` — `decorator.py`'s `ParamSpec`/`TypeVar`/`@overload` work now reaches consumers

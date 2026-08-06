@@ -340,6 +340,31 @@ def scan(
             "cap is reported as TRUNCATED rather than counted as safe."
         ),
     ),
+    attacker_model: str = typer.Option(
+        None,
+        "--attacker-model",
+        help=(
+            "Model used to author mutated payloads after a refusal. Defaults to "
+            "--model. An aligned target is also an aligned attacker, so probing "
+            "it against itself often means every lineage dies at generation 1 -- "
+            "point this at a model willing to author an injection to get a real "
+            "adaptive scan."
+        ),
+    ),
+    attacker_endpoint: str = typer.Option(
+        None,
+        "--attacker-endpoint",
+        help="OpenAI-compatible API base URL for the attacker model. Defaults to --endpoint.",
+    ),
+    attacker_api_key: str = typer.Option(
+        None,
+        "--attacker-api-key",
+        envvar="MODELFUZZ_ATTACKER_API_KEY",
+        help=(
+            "API key for the attacker endpoint. Defaults to --api-key. Read from "
+            "MODELFUZZ_ATTACKER_API_KEY when not passed."
+        ),
+    ),
 ) -> None:
     """Red-team a target agent with an adaptive prompt-injection fuzzer.
 
@@ -349,11 +374,20 @@ def scan(
     """
     client = _make_client(endpoint, api_key)
 
+    attacker_model = attacker_model or model
+    attacker_client = (
+        client
+        if attacker_endpoint is None and attacker_api_key is None
+        else _make_client(attacker_endpoint or endpoint, attacker_api_key or api_key)
+    )
+
     typer.echo(f"{BOLD}{CYAN}{'=' * 64}{RESET}")
     typer.echo(f"{BOLD}{CYAN} MODELFUZZ SCAN: probing {model} at {endpoint}{RESET}")
     typer.echo(
         f"{BOLD}{CYAN} adaptive fuzzing · {budget_s:.0f}s budget · {len(SEED_ATTACKS)} seeds{RESET}"
     )
+    if attacker_model != model:
+        typer.echo(f"{BOLD}{CYAN} attacker model: {attacker_model}{RESET}")
     typer.echo(f"{BOLD}{CYAN}{'=' * 64}{RESET}\n")
 
     start = time.monotonic()
@@ -407,7 +441,9 @@ def scan(
 
         typer.echo(f"{YELLOW}[🧬 MUTATING] Requesting a new payload…{RESET}")
         try:
-            mutated = _next_attack(client, model, prompt, result.reply, max_tokens)
+            mutated = _next_attack(
+                attacker_client, attacker_model, prompt, result.reply, max_tokens
+            )
         except Exception as exc:  # noqa: BLE001 - a failed attacker call ends this lineage
             errors += 1
             typer.echo(f"{YELLOW}[⚠️  ERROR] Attacker call failed: {_truncate(str(exc))}{RESET}\n")

@@ -430,3 +430,59 @@ class TestSeparateAttackerCall:
 
         assert "lineage dead" in result.output
         assert len(client.mutation_prompts) == len(cli.SEED_ATTACKS)
+
+
+class TestAttackerModel:
+    """``--attacker-model`` decouples payload generation from the target probe."""
+
+    def test_defaults_to_target_model_and_client(self, monkeypatch):
+        # No --attacker-model: same client, same model used for both the probe
+        # and the mutation call.
+        client = StubClient(probe_result=_refusal_response(), mutation="a mutated payload")
+        made_with: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            cli,
+            "_make_client",
+            lambda endpoint, api_key: made_with.append((endpoint, api_key)) or client,
+        )
+        result = runner.invoke(
+            cli.app, ["scan", "--endpoint", "http://x/v1", "--model", "m", "--budget-s", "1"]
+        )
+
+        assert result.exit_code == 0
+        # _make_client is only called once -- no separate attacker client built.
+        assert len(made_with) == 1
+
+    def test_attacker_model_routes_mutation_calls_to_a_different_model(self, monkeypatch):
+        target_client = StubClient(probe_result=_refusal_response(), mutation="unused")
+        attacker_client = StubClient(
+            probe_result=_refusal_response(), mutation="PAYLOAD from attacker"
+        )
+
+        def fake_make_client(endpoint, api_key):
+            return attacker_client if endpoint == "http://attacker/v1" else target_client
+
+        monkeypatch.setattr(cli, "_make_client", fake_make_client)
+        result = runner.invoke(
+            cli.app,
+            [
+                "scan",
+                "--endpoint",
+                "http://x/v1",
+                "--model",
+                "target-model",
+                "--attacker-model",
+                "attacker-model",
+                "--attacker-endpoint",
+                "http://attacker/v1",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert "attacker model: attacker-model" in result.output
+        # The mutation call went to the attacker client, not the target's.
+        assert attacker_client.mutation_prompts
+        assert not target_client.mutation_prompts
+        # The target client only ever saw probes.
+        assert target_client.probe_prompts
+        assert not target_client.mutation_prompts
