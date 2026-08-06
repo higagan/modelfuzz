@@ -1,0 +1,12 @@
+# ModelFuzz
+
+> Runtime guardrails for AI agents at the tool-call execution layer. `pip install modelfuzz`.
+
+## Project sources
+
+- [ModelFuzz README](https://raw.githubusercontent.com/higagan/modelfuzz/main/README.md): Runtime guardrails for AI agents at the tool-call execution layer. `pip install modelfuzz`.
+- [ModelFuzz assistant guide](https://raw.githubusercontent.com/higagan/modelfuzz/main/AGENTS.md): Assistant usage rules and limitations; the default SensitiveDataFilter is a three-keyword tripwire, not a credential scanner.
+- [ModelFuzz Red-Team Scanner](https://raw.githubusercontent.com/higagan/modelfuzz/main/README.md): Adaptive pre-deployment fuzzing for OpenAI-compatible local or hosted models. A refusal can trigger a separate attacker call and another generation; truncated or failed probes remain inconclusive rather than being reported safe.
+- [Contributing to ModelFuzz](https://raw.githubusercontent.com/higagan/modelfuzz/main/CONTRIBUTING.md): Contribution workflow, required issue discussion, local tests, and the policy that AI assistance is allowed but automated drive-by pull requests are not.
+- [ModelFuzz security policy](https://raw.githubusercontent.com/higagan/modelfuzz/main/SECURITY.md): Private vulnerability-reporting route; documented SensitiveDataFilter limitations are not vulnerabilities.
+- [ModelFuzz changelog](https://raw.githubusercontent.com/higagan/modelfuzz/main/CHANGELOG.md): Release history for the maintained Python package.
