@@ -224,13 +224,25 @@ $ modelfuzz scan --endpoint http://localhost:11434/v1 --model qwen2.5:1.5b
  Fix: wrap your tools with @shield_tool to block unsafe calls at the execution layer.
 ```
 
-Against a well-aligned target the loop behaves differently and more quietly: the model refuses the probe, then *also* refuses to author a replacement payload, so the lineage ends (`no usable payload came back — lineage dead`) and the scan moves on. Since the attacker call currently uses the same model as the target, a strongly-aligned model will not attack itself — see [#35](https://github.com/higagan/modelfuzz/issues/35) for making the attacker model configurable.
+Against a well-aligned target the loop behaves differently and more quietly: the model refuses the probe, then *also* refuses to author a replacement payload, so the lineage ends (`no usable payload came back — lineage dead`) and the scan moves on. By default the attacker call uses the same model as the target, so a strongly-aligned model will not attack itself and every lineage dies at generation 1. Point `--attacker-model` at a model willing to author an injection to get real mutations against an aligned target:
+
+```bash
+modelfuzz scan \
+  --endpoint https://openrouter.ai/api/v1 \
+  --model anthropic/claude-sonnet-5 \
+  --attacker-model mistralai/ministral-8b
+```
+
+A model that resists the obvious attack may still fall to a later mutation — but only when the attacker model actually cooperates. With the default (attacker == target), an aligned target's refusal to attack itself is the more common outcome.
 
 Options:
 
 - `--budget-s` — time budget in seconds for the attack loop (default `30`).
 - `--api-key` — API key for hosted endpoints (defaults to a dummy value for local models). Read from `MODELFUZZ_API_KEY` when not passed.
 - `--max-tokens` — cap on reply length per request (default `1024`).
+- `--attacker-model` — model used to author mutated payloads after a refusal (default: `--model`).
+- `--attacker-endpoint` — API base URL for the attacker model (default: `--endpoint`).
+- `--attacker-api-key` — API key for the attacker endpoint (default: `--api-key`). Read from `MODELFUZZ_ATTACKER_API_KEY` when not passed.
 
 ### Scanning a hosted model
 
