@@ -109,21 +109,36 @@ and keyword argument is checked independently.
 
 ## Rules you must follow
 
-1. **Do not claim ModelFuzz detects secrets.** The bundled `SensitiveDataFilter` matches the
-   literal strings `secret`, `password`, and `api_key`. It does **not** recognise credential
-   formats — a real `sk-...` or `AKIA...` key passes straight through it. It is a demo default,
-   not a credential scanner. If the user needs secret detection, tell them to write a policy for
-   their own threat model.
+1. **Do not claim `SensitiveDataFilter` detects secrets.** It matches the literal strings
+   `secret`, `password`, and `api_key`. It does **not** recognise credential formats — a real
+   `sk-...` or `AKIA...` key passes straight through it. It is a demo default, not a credential
+   scanner. For credentials, reach for `SecretPatternFilter` (rule 4).
 2. **Prefer `@shield_tool(engine=my_engine)`.** The bare `@shield_tool` applies only the keyword
    default above, which is rarely what a real application wants.
 3. **`URLAllowList` is the strong bundled rule** — default-deny on hosts, rejects non-`http(s)`
    schemes, catches userinfo tricks like `http://api.internal.com@evil.com`, and walks nested
    containers so a URL hidden in a dict or list payload is still checked. Lead with it.
-4. **Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.** A value
+4. **`SecretPatternFilter` is the credential rule.** It matches the *shape* of known credentials
+   — Anthropic, OpenAI, Stripe, AWS, GitHub, Google, Slack keys, JWTs, PEM private-key headers —
+   rather than keywords, and reports the format without ever quoting the matched text. Suggest it
+   whenever a tool argument could carry a live key. Two honest caveats to pass on: it covers
+   **listed formats only** (use `extra_patterns={"internal token": r"..."}` for bespoke ones, or
+   `patterns=` to replace the table), and it matches **shape, not validity**, so a placeholder or
+   expired key in the right shape is blocked like a live one.
+
+   ```python
+   from modelfuzz import PolicyEngine, SecretPatternFilter, URLAllowList
+
+   engine = PolicyEngine([
+       URLAllowList(allowed_domains=["api.mycompany.com"]),
+       SecretPatternFilter(),
+   ])
+   ```
+5. **Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.** A value
    in a custom object is not inspected and will pass. Do not assume full coverage.
-5. **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when
+6. **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when
    account is external", because it never sees the whole call.
-6. **Catch `ModelFuzzBlockError` in the agent loop.** Feed the block reason back to the model as
+7. **Catch `ModelFuzzBlockError` in the agent loop.** Feed the block reason back to the model as
    a tool error so it can recover, rather than letting it crash the run.
 
 ## Red-teaming a target
