@@ -79,7 +79,37 @@ except ModelFuzzBlockError as e:
 
 Blocks are also logged at `WARNING` on the `modelfuzz` logger with structured fields (`modelfuzz_tool`, `modelfuzz_rule`, `modelfuzz_reason`) for your audit trail. Nothing is ever written to stdout.
 
-> **Using the bare `@shield_tool`?** It applies a default `SensitiveDataFilter` that matches the literal strings `secret`, `password`, and `api_key` — a demo default, not a credential scanner. See [Limitations](#limitations).
+> **Using the bare `@shield_tool`?** It applies a default `SensitiveDataFilter` that matches the literal strings `secret`, `password`, and `api_key` — a demo default, not a credential scanner. For real credential formats, add [`SecretPatternFilter`](#blocking-real-credentials) to your engine. See [Limitations](#limitations).
+
+### Blocking real credentials
+
+`SensitiveDataFilter` matches the *word* "password". `SecretPatternFilter` matches the *shape* of a real credential, so an agent talked into pasting a live key into a tool argument is stopped before the call runs:
+
+```python
+from modelfuzz import PolicyEngine, SecretPatternFilter, URLAllowList, shield_tool
+
+engine = PolicyEngine([
+    URLAllowList(allowed_domains=["api.mycompany.com"]),
+    SecretPatternFilter(),
+])
+
+@shield_tool(engine=engine)
+def http_post(url: str, body: str) -> str:
+    return f"POST {url}"
+
+http_post("https://api.mycompany.com/v1", "AKIAIOSFODNN7EXAMPLE")
+# ModelFuzzBlockError: String contains a possible AWS access key ID
+```
+
+It recognises Anthropic, OpenAI, Stripe, AWS, GitHub, Google, and Slack key formats, JWTs, and PEM private-key headers. The block reason names the *format* and never quotes the matched text — blocks are logged, and a reason carrying the credential would leak the very thing the rule exists to contain.
+
+Cover your own token formats without giving up the bundled ones:
+
+```python
+SecretPatternFilter(extra_patterns={"internal token": r"INT-[0-9]{8}"})
+```
+
+Pass `patterns=` instead of `extra_patterns=` to replace the bundled table entirely. It is a format matcher, not a validity check or an entropy scanner — see [Limitations](#limitations).
 
 ## When to use ModelFuzz
 
@@ -95,7 +125,7 @@ Blocks are also logged at `WARNING` on the `modelfuzz` logger with structured fi
 
 - **If** your application only generates or classifies text and calls no tools, **then** ModelFuzz adds nothing — there is no tool call to intercept.
 - **If** you need prompt filtering, input sanitisation, or content moderation, **then** ModelFuzz is the wrong layer. It never inspects prompts or model output, only tool-call arguments.
-- **If** you expect the bundled default to detect credentials, **then** see [Limitations](#limitations) first — `SensitiveDataFilter` matches three literal keywords and will not catch a real `sk-…` or `AKIA…` key. Write a policy for your own threat model.
+- **If** you expect the bundled *default* to detect credentials, **then** see [Limitations](#limitations) first — `SensitiveDataFilter` matches three literal keywords and will not catch a real `sk-…` or `AKIA…` key. Add [`SecretPatternFilter`](#blocking-real-credentials) for that, and write policies for anything specific to your own threat model.
 
 Building on this with an AI coding assistant? See [AGENTS.md](AGENTS.md).
 
@@ -173,7 +203,8 @@ Output:
 
 ModelFuzz is pre-1.0 and provides the interception point, the policy protocol, and an adaptive fuzzer. Know these before relying on it:
 
-- **The default filter is a keyword tripwire, not a secret scanner.** `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key`. It does not recognise credential formats, so a real `sk-…` or `AKIA…` key passes straight through — while ordinary prose containing "password" is blocked. Treat it as a demo default and write policies for your own threat model.
+- **The default filter is a keyword tripwire, not a secret scanner.** `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key`. It does not recognise credential formats, so a real `sk-…` or `AKIA…` key passes straight through — while ordinary prose containing "password" is blocked. Treat it as a demo default; add `SecretPatternFilter` for credential formats, and write policies for your own threat model.
+- **`SecretPatternFilter` matches known formats, not secrets in general.** It recognises the credential shapes listed in [Blocking real credentials](#blocking-real-credentials) and nothing else: a bespoke internal token, a bare high-entropy string, or a provider not in the table passes untouched. It also matches *shape, not validity* — a revoked key, a docs placeholder, or a test fixture in the right shape is blocked exactly like a live credential. Use `extra_patterns=` for your own formats.
 - **Unrecognised argument types are not inspected, and pass.** Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are walked. A secret carried in a custom object is *not* checked and the call proceeds — the default is to allow what it cannot read.
 - **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when account is external", because it never sees the whole call.
 - **It does not inspect prompts or model output** — only tool-call arguments. It is not a content filter.

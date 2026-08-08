@@ -2,7 +2,7 @@
 
 import pytest
 
-from modelfuzz.rules import SensitiveDataFilter, URLAllowList
+from modelfuzz.rules import SecretPatternFilter, SensitiveDataFilter, URLAllowList
 
 
 class TestURLAllowList:
@@ -296,3 +296,170 @@ class TestSensitiveDataFilter:
         violation = filter(data)
         assert violation is not None
         assert "secret" in violation.reason
+
+
+class TestSecretPatternFilter:
+    """Tests for the SecretPatternFilter policy."""
+
+    @pytest.fixture
+    def secret_filter(self) -> SecretPatternFilter:
+        return SecretPatternFilter()
+
+    # --- The gap this rule exists to close ---------------------------------
+
+    def test_catches_a_key_the_keyword_filter_misses(self):
+        """The motivating case: a real key that SensitiveDataFilter lets through."""
+        key = "sk-ant-api03-" + "a1B2c3D4e5" * 5
+        assert SensitiveDataFilter()(key) is None
+        assert SecretPatternFilter()(key) is not None
+
+    def test_allows_prose_the_keyword_filter_blocks(self):
+        """Shape, not vocabulary: ordinary prose about a password is not a credential."""
+        prose = "Remember to rotate your password every quarter."
+        assert SensitiveDataFilter()(prose) is not None
+        assert SecretPatternFilter()(prose) is None
+
+    # --- Recognised formats -------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("label", "value"),
+        [
+            ("Anthropic API key", "sk-ant-api03-" + "x" * 40),
+            ("OpenAI API key", "sk-" + "A1b2C3d4E5" * 3),
+            ("OpenAI API key", "sk-proj-" + "A1b2C3d4E5" * 3),
+            ("Stripe secret key", "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"),
+            ("AWS access key ID", "AKIAIOSFODNN7EXAMPLE"),
+            ("AWS access key ID", "ASIAIOSFODNN7EXAMPLE"),
+            ("GitHub token", "ghp_" + "b" * 36),
+            ("GitHub fine-grained token", "github_pat_" + "c" * 30),
+            ("Google API key", "AIza" + "D" * 35),
+            ("Slack token", "xoxb-123456789012-abcdefghijkl"),
+            ("JSON Web Token", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP"),
+            ("private key block", "-----BEGIN RSA PRIVATE KEY-----\nMIIEow==\n"),
+            ("private key block", "-----BEGIN PRIVATE KEY-----\nMIIEow==\n"),
+        ],
+    )
+    def test_blocks_known_credential_formats(
+        self, secret_filter: SecretPatternFilter, label: str, value: str
+    ):
+        violation = secret_filter(value)
+        assert violation is not None
+        assert violation.rule_name == "SecretPatternFilter"
+        assert label in violation.reason
+
+    def test_catches_a_credential_embedded_in_a_sentence(self, secret_filter: SecretPatternFilter):
+        """A key does not have to be the whole argument to count."""
+        body = f"Here is the token you asked for: ghp_{'d' * 36} -- please keep it safe."
+        assert secret_filter(body) is not None
+
+    def test_specific_format_wins_over_the_broader_one(self, secret_filter: SecretPatternFilter):
+        """An Anthropic key also matches the generic sk- shape; it reports as Anthropic."""
+        violation = secret_filter("sk-ant-api03-" + "e" * 40)
+        assert violation is not None
+        assert "Anthropic" in violation.reason
+
+    # --- The reason must never carry the credential ------------------------
+
+    def test_reason_does_not_echo_the_matched_secret(self, secret_filter: SecretPatternFilter):
+        """Blocks are logged; a reason quoting the key would leak what it guards."""
+        key = "AKIAIOSFODNN7EXAMPLE"
+        violation = secret_filter(key)
+        assert violation is not None
+        assert key not in violation.reason
+        assert "IOSFODNN" not in violation.reason
+
+    # --- Values this rule does not govern ----------------------------------
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "hello world",
+            "https://api.internal.com/v1",
+            "sk-short",  # too short to be a key
+            "AKIA",  # prefix alone
+            "",
+            None,
+            42,
+            # "sk-" appears inside plenty of ordinary hyphenated words. These are
+            # long enough to satisfy the length floor and must still pass.
+            "a task-oriented-approach-for-agents",
+            "risk-management-documentation-x",
+            "my disk-usage-monitoring-tool-v2",
+        ],
+    )
+    def test_allows_values_that_are_not_credentials(
+        self, secret_filter: SecretPatternFilter, value: object
+    ):
+        assert secret_filter(value) is None
+
+    def test_ignores_a_credential_inside_a_custom_object(self, secret_filter: SecretPatternFilter):
+        """Documented limit: an unreachable carrier is not inspected, and passes."""
+
+        class Carrier:
+            def __init__(self) -> None:
+                self.token = "AKIAIOSFODNN7EXAMPLE"
+
+        assert secret_filter(Carrier()) is None
+
+    # --- Container walk -----------------------------------------------------
+
+    def test_blocks_a_credential_in_a_nested_dict_value(self, secret_filter: SecretPatternFilter):
+        payload = {"outer": {"headers": {"authorization": f"Bearer ghp_{'f' * 36}"}}}
+        assert secret_filter(payload) is not None
+
+    def test_blocks_a_credential_in_a_dict_key(self, secret_filter: SecretPatternFilter):
+        assert secret_filter({"AKIAIOSFODNN7EXAMPLE": "value"}) is not None
+
+    def test_blocks_a_credential_in_a_list(self, secret_filter: SecretPatternFilter):
+        assert secret_filter(["clean", ["nested", "AKIAIOSFODNN7EXAMPLE"]]) is not None
+
+    def test_blocks_a_credential_in_a_tuple(self, secret_filter: SecretPatternFilter):
+        assert secret_filter(("clean", "AKIAIOSFODNN7EXAMPLE")) is not None
+
+    def test_blocks_a_credential_in_a_set(self, secret_filter: SecretPatternFilter):
+        assert secret_filter({"clean", "AKIAIOSFODNN7EXAMPLE"}) is not None
+
+    def test_blocks_a_credential_in_a_frozenset(self, secret_filter: SecretPatternFilter):
+        assert secret_filter(frozenset({"AKIAIOSFODNN7EXAMPLE"})) is not None
+
+    def test_blocks_a_credential_in_bytes(self, secret_filter: SecretPatternFilter):
+        assert secret_filter(b"AKIAIOSFODNN7EXAMPLE") is not None
+
+    def test_blocks_a_credential_in_a_bytearray(self, secret_filter: SecretPatternFilter):
+        assert secret_filter(bytearray(b"AKIAIOSFODNN7EXAMPLE")) is not None
+
+    def test_survives_a_self_referential_dict(self, secret_filter: SecretPatternFilter):
+        data: dict = {"name": "clean"}
+        data["self"] = data
+        assert secret_filter(data) is None
+
+    def test_survives_a_self_referential_list(self, secret_filter: SecretPatternFilter):
+        data: list = ["clean"]
+        data.append(data)
+        assert secret_filter(data) is None
+
+    def test_blocks_a_credential_inside_a_cycle(self, secret_filter: SecretPatternFilter):
+        data: dict = {"token": "AKIAIOSFODNN7EXAMPLE"}
+        data["self"] = data
+        assert secret_filter(data) is not None
+
+    # --- Configuration ------------------------------------------------------
+
+    def test_extra_patterns_extend_the_bundled_table(self):
+        """The common case: cover an internal format without losing the defaults."""
+        secret_filter = SecretPatternFilter(extra_patterns={"internal token": r"INT-[0-9]{8}"})
+        violation = secret_filter("INT-12345678")
+        assert violation is not None
+        assert "internal token" in violation.reason
+        # Bundled coverage is retained.
+        assert secret_filter("AKIAIOSFODNN7EXAMPLE") is not None
+
+    def test_patterns_replace_the_bundled_table(self):
+        """Passing patterns opts out of the defaults entirely."""
+        secret_filter = SecretPatternFilter(patterns={"internal token": r"INT-[0-9]{8}"})
+        assert secret_filter("INT-12345678") is not None
+        assert secret_filter("AKIAIOSFODNN7EXAMPLE") is None
+
+    def test_empty_patterns_dict_disables_all_matching(self):
+        """An explicitly empty table is honoured, not silently replaced by defaults."""
+        assert SecretPatternFilter(patterns={})("AKIAIOSFODNN7EXAMPLE") is None

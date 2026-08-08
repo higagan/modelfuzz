@@ -4,6 +4,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+- feat: add `SecretPatternFilter`, a bundled policy that blocks tool-call arguments carrying a recognisable credential — Anthropic, OpenAI, Stripe, AWS, GitHub, Google and Slack key formats, JWTs, and PEM private-key headers. Where `SensitiveDataFilter` matches the *word* "password", this matches the *shape* of a real key, closing the gap where a live `sk-…` or `AKIA…` passed straight through the bundled default. Opt-in: the bare `@shield_tool` default is unchanged. Extend with `extra_patterns=` or replace the table with `patterns=`. Fixes #70
+- fix: the block reason for a matched credential names the format only and never quotes the matched text — blocks are logged at `WARNING`, and a reason carrying the key would leak the very thing the rule exists to contain
+- docs: add a "Blocking real credentials" README section, record `SecretPatternFilter`'s limits (listed formats only; matches shape, not validity) in Limitations, and update `AGENTS.md` so assistants stop reporting that ModelFuzz cannot detect credentials
+
 - feat: `scan` gains `--attacker-model`, `--attacker-endpoint`, and `--attacker-api-key`, decoupling payload mutation from the target model (defaults to the target for backwards compatibility). Previously the attacker call always used the target model, so an aligned target refused to author an injection against itself and every lineage died at generation 1 — the adaptive fuzzer never adapted against exactly the models worth testing. Fixes #35
 - docs: qualify the README's "may still fall to a later mutation" claim — that only holds when `--attacker-model` points at a model willing to author an injection; with the default (attacker == target), an aligned target's refusal to attack itself is the more common outcome
 
