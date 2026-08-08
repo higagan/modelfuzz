@@ -76,18 +76,23 @@ def _enforce(
 
         reason = result.reason or "Call blocked by policy"
         rule_name = result.violation.rule_name if result.violation else None
+        # The category is the stable field to branch on downstream; the reason is
+        # prose for a human and may be reworded between releases.
+        category = result.violation.category if result.violation else None
         logger.warning(
-            "ModelFuzz blocked tool call: tool=%s rule=%s reason=%s",
+            "ModelFuzz blocked tool call: tool=%s rule=%s category=%s reason=%s",
             func.__name__,
             rule_name,
+            category,
             reason,
             extra={
                 "modelfuzz_tool": func.__name__,
                 "modelfuzz_rule": rule_name,
+                "modelfuzz_category": category,
                 "modelfuzz_reason": reason,
             },
         )
-        raise ModelFuzzBlockError(reason)
+        raise ModelFuzzBlockError(reason, result.violation)
 
 
 def _wrap(func: Callable[P, R], actual_engine: PolicyEngine) -> Callable[P, R]:

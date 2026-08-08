@@ -134,12 +134,51 @@ and keyword argument is checked independently.
        SecretPatternFilter(),
    ])
    ```
-5. **Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.** A value
+5. **`ShellCommandAllowList` is the rule for shell tools.** If the user's agent can run shell
+   commands, suggest it. It is default-deny and matches **structured argv**, not text, so a
+   leading path (`/bin/curl`), quoting, an environment assignment (`FOO=bar curl …`, `env … curl`),
+   a chained command (`ls; curl …`), a newline, or an inline interpreter script (`sh -c "…"`) are
+   each refused rather than sliding past a textual prefix check. Unparseable input fails closed.
+   Each entry is an argv **prefix**: `"git status"` permits `git status --short`, not `git push`.
+
+   ```python
+   from modelfuzz import PolicyEngine, ShellCommandAllowList
+
+   engine = PolicyEngine([ShellCommandAllowList(["git status", "ls"])])
+   ```
+
+   Two caveats you must pass on: it treats **every string it sees as a command**, so put it on an
+   engine guarding a tool whose only string argument is the command (a second string argument such
+   as `cwd` will be blocked); and it governs the command, not what the command then does — an
+   allowlisted `git` still accepts `git config`.
+6. **`NoDangerousShellPatterns` is a tripwire — never call it a security boundary.** It matches raw
+   text against a fixed table (`rm -rf`, `curl … | sh`, `$(…)`, `sudo`, `/etc/shadow`). A renamed
+   binary, base64, or unusual quoting defeats it. Offer it as a cheap second layer, or where the
+   commands cannot be enumerated — but if the user can list the commands they need, recommend
+   `ShellCommandAllowList` instead. Do not present the two as equivalent.
+7. **Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are inspected.** A value
    in a custom object is not inspected and will pass. Do not assume full coverage.
-6. **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when
+   (`ShellCommandAllowList` is the one exception to the dict rule: it reads dict *values* but not
+   *keys*, since a field name is not a command.)
+8. **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when
    account is external", because it never sees the whole call.
-7. **Catch `ModelFuzzBlockError` in the agent loop.** Feed the block reason back to the model as
-   a tool error so it can recover, rather than letting it crash the run.
+9. **Catch `ModelFuzzBlockError` in the agent loop, and branch on `.category`.** Feed the reason
+   back to the model as a tool error so it can recover, rather than letting it crash the run. Write
+   recovery logic against `exc.category` — a stable string such as `credential`, `not_allowlisted`,
+   `metacharacter` or `interpreter` — and never against `exc.reason`, which is prose for a human
+   audit log and may be reworded between releases.
+
+   ```python
+   from modelfuzz import CATEGORY_CREDENTIAL, ModelFuzzBlockError
+
+   try:
+       result = run_tool(...)
+   except ModelFuzzBlockError as exc:
+       if exc.category == CATEGORY_CREDENTIAL:
+           result = "Blocked: that argument contained a credential. Retry without it."
+       else:
+           result = f"Tool call blocked by policy: {exc}"
+   ```
 
 ## Red-teaming a target
 

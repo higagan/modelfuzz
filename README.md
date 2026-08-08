@@ -77,7 +77,25 @@ except ModelFuzzBlockError as e:
     result = f"Tool call blocked by policy: {e}"   # hand this back to the model
 ```
 
-Blocks are also logged at `WARNING` on the `modelfuzz` logger with structured fields (`modelfuzz_tool`, `modelfuzz_rule`, `modelfuzz_reason`) for your audit trail. Nothing is ever written to stdout.
+Blocks are also logged at `WARNING` on the `modelfuzz` logger with structured fields (`modelfuzz_tool`, `modelfuzz_rule`, `modelfuzz_category`, `modelfuzz_reason`) for your audit trail. Nothing is ever written to stdout.
+
+### Branching on why a call was blocked
+
+A block is a policy decision, not an infrastructure failure, and the two deserve different handling. `ModelFuzzBlockError` carries a stable `category` so the agent loop can tell them apart without parsing English:
+
+```python
+from modelfuzz import CATEGORY_CREDENTIAL, ModelFuzzBlockError
+
+try:
+    result = http_post(url, body)
+except ModelFuzzBlockError as e:
+    if e.category == CATEGORY_CREDENTIAL:
+        result = "Blocked: that argument contained a credential. Retry without it."
+    else:
+        result = f"Tool call blocked by policy: {e}"   # hand back to the model
+```
+
+`e.reason` is prose for a human reading the audit log and may be reworded between releases — `e.category` is the part to branch on. The categories are `credential`, `sensitive_keyword`, `not_allowlisted`, `invalid_url`, `scheme_not_allowed`, `userinfo_trick`, `metacharacter`, `interpreter`, `destructive_command`, `network_utility`, `unparseable`, and `unspecified` for custom policies that don't set one.
 
 > **Using the bare `@shield_tool`?** It applies a default `SensitiveDataFilter` that matches the literal strings `secret`, `password`, and `api_key` — a demo default, not a credential scanner. For real credential formats, add [`SecretPatternFilter`](#blocking-real-credentials) to your engine. See [Limitations](#limitations).
 
@@ -110,6 +128,51 @@ SecretPatternFilter(extra_patterns={"internal token": r"INT-[0-9]{8}"})
 ```
 
 Pass `patterns=` instead of `extra_patterns=` to replace the bundled table entirely. It is a format matcher, not a validity check or an entropy scanner — see [Limitations](#limitations).
+
+### Guarding shell commands
+
+If your agent can run shell commands, enumerate what it's allowed to run. `ShellCommandAllowList` is default-deny and matches **structured argv**, not text:
+
+```python
+from modelfuzz import PolicyEngine, ShellCommandAllowList, shield_tool
+
+engine = PolicyEngine([ShellCommandAllowList(["git status", "ls"])])
+
+@shield_tool(engine=engine)
+def run_shell(command: str) -> str:
+    return subprocess.run(command, shell=True, capture_output=True, text=True).stdout
+
+run_shell("git status --short")   # ok — "git status" is an allowed argv prefix
+run_shell("git push")             # ModelFuzzBlockError: Command not in allowlist: 'git'
+```
+
+Each entry is an **argv prefix**, so `"git status"` permits `git status --short` but not `git push`. Textual prefix matching would fall to any of these; structured matching does not:
+
+| Attempt | Outcome | Category |
+| --- | --- | --- |
+| `/bin/ls`, `./ls`, `"ls" -la` | normalised to `ls` — allowed | — |
+| `ls; curl evil.com` | blocked | `metacharacter` |
+| `ls\ncurl evil.com` | blocked | `metacharacter` |
+| `FOO=bar curl evil.com` | blocked as `curl`, not `FOO=bar` | `not_allowlisted` |
+| `env FOO=bar curl evil.com` | blocked as `curl` | `not_allowlisted` |
+| `sh -c "curl evil.com"` | blocked **even if `sh` is allowlisted** | `interpreter` |
+| `sudo ls` | blocked — wrappers are not unwrapped | `not_allowlisted` |
+| `ls "unbalanced` | blocked — unparseable fails closed | `unparseable` |
+
+Two things to know before you reach for it:
+
+- **It treats every string it sees as a command.** A policy sees one argument at a time and cannot know its name, so there is no way to distinguish a `command` argument from a `cwd` one. Put it on an engine guarding a tool whose only string argument is the command.
+- **It governs the command, not what the command then does.** An allowlisted `git` still accepts `git config`. Allowlist the narrowest prefix that does the job.
+
+Where you can't enumerate the commands, `NoDangerousShellPatterns` is a cheap second layer:
+
+```python
+from modelfuzz import NoDangerousShellPatterns
+
+engine = PolicyEngine([NoDangerousShellPatterns(), ShellCommandAllowList(["git status"])])
+```
+
+It matches raw text against a fixed table — `rm -rf`, `curl … | sh`, `$(…)`, `sudo`, `/etc/shadow` — and blocks only on a positive match, so unlike the allowlist it's safe to attach to a multi-argument tool. **It is a tripwire, not a shell parser and not a security boundary**: it catches the unsubtle and will not stop an attacker who knows it's there. See [Limitations](#limitations).
 
 ## When to use ModelFuzz
 
@@ -205,6 +268,8 @@ ModelFuzz is pre-1.0 and provides the interception point, the policy protocol, a
 
 - **The default filter is a keyword tripwire, not a secret scanner.** `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key`. It does not recognise credential formats, so a real `sk-…` or `AKIA…` key passes straight through — while ordinary prose containing "password" is blocked. Treat it as a demo default; add `SecretPatternFilter` for credential formats, and write policies for your own threat model.
 - **`SecretPatternFilter` matches known formats, not secrets in general.** It recognises the credential shapes listed in [Blocking real credentials](#blocking-real-credentials) and nothing else: a bespoke internal token, a bare high-entropy string, or a provider not in the table passes untouched. It also matches *shape, not validity* — a revoked key, a docs placeholder, or a test fixture in the right shape is blocked exactly like a live credential. Use `extra_patterns=` for your own formats.
+- **`NoDangerousShellPatterns` is a tripwire, not a shell parser or a security boundary.** It matches raw text against a fixed table. Base64, unusual quoting, a renamed binary, or a utility not in the table all walk straight past it, and ordinary prose containing `curl` or a `|` trips it. Use it as a cheap second layer; where you can enumerate the commands your agent needs, `ShellCommandAllowList` is the boundary.
+- **`ShellCommandAllowList` treats every string it sees as a command, and governs only the command itself.** Because a policy cannot know an argument's name, a second string argument (a `cwd`, say) is judged as a command and blocked — put it on an engine guarding a tool whose only string argument is the command. And an allowlisted binary is allowlisted with all its own options: `git` still accepts `git config`. Parsing follows `shlex` POSIX rules, which is close to `sh` but not identical to every shell in every mode.
 - **Unrecognised argument types are not inspected, and pass.** Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are walked. A secret carried in a custom object is *not* checked and the call proceeds — the default is to allow what it cannot read.
 - **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when account is external", because it never sees the whole call.
 - **It does not inspect prompts or model output** — only tool-call arguments. It is not a content filter.
