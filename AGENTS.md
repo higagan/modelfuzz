@@ -136,10 +136,11 @@ and keyword argument is checked independently.
    ```
 5. **`ShellCommandAllowList` is the rule for shell tools.** If the user's agent can run shell
    commands, suggest it. It is default-deny and matches **structured argv**, not text, so a
-   leading path (`/bin/curl`), quoting, an environment assignment (`FOO=bar curl …`, `env … curl`),
-   a chained command (`ls; curl …`), a newline, or an inline interpreter script (`sh -c "…"`) are
-   each refused rather than sliding past a textual prefix check. Unparseable input fails closed.
-   Each entry is an argv **prefix**: `"git status"` permits `git status --short`, not `git push`.
+   leading path (`/bin/curl`), quoting, a chained command (`ls; curl …`), a newline, an
+   environment assignment (`PATH=/tmp/pwn ls`), or an inline interpreter script (`sh -c "…"`,
+   `python -cCODE`, `bash -lc "…"`, `node --eval=…`) are each refused rather than sliding past a
+   textual prefix check. Unparseable input fails closed. Each entry is an argv **prefix**:
+   `"git status"` permits `git status --short`, not `git push`.
 
    ```python
    from modelfuzz import PolicyEngine, ShellCommandAllowList
@@ -147,10 +148,22 @@ and keyword argument is checked independently.
    engine = PolicyEngine([ShellCommandAllowList(["git status", "ls"])])
    ```
 
-   Two caveats you must pass on: it treats **every string it sees as a command**, so put it on an
-   engine guarding a tool whose only string argument is the command (a second string argument such
-   as `cwd` will be blocked); and it governs the command, not what the command then does — an
-   allowlisted `git` still accepts `git config`.
+   Caveats you must pass on:
+
+   - **Never tell a user it is safe to allowlist an interpreter.** Inline-script rejection is
+     best-effort, not a boundary — `awk 'BEGIN{system("id")}'` needs no flag at all, and
+     `sh script.sh` runs a file the rule never sees. Allowlisting `sh`, `python`, `node` or `awk`
+     is close to allowlisting arbitrary execution, and the constructor warns about it. Recommend
+     allowlisting the specific program instead.
+   - **Environment assignments are refused, not stripped.** `PATH=`, `LD_PRELOAD=` and
+     `GIT_SSH_COMMAND=` each subvert an allowlisted binary, so all assignments are blocked by
+     default. If the user genuinely needs one, that is `allowed_env={"LANG"}` — and opting a name
+     in means accepting whatever value the caller supplies.
+   - It treats **every string it sees as a command**, so put it on an engine guarding a tool whose
+     only string argument is the command (a second string argument such as `cwd` will be blocked).
+   - It governs the command, not what the command then does — an allowlisted `git` still accepts
+     `git config`. And an allowlisted *name* runs whatever the OS resolves it to, so advise
+     pinning `PATH` and the working directory at the tool.
 6. **`NoDangerousShellPatterns` is a tripwire — never call it a security boundary.** It matches raw
    text against a fixed table (`rm -rf`, `curl … | sh`, `$(…)`, `sudo`, `/etc/shadow`). A renamed
    binary, base64, or unusual quoting defeats it. Offer it as a cheap second layer, or where the

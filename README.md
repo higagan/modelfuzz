@@ -95,7 +95,7 @@ except ModelFuzzBlockError as e:
         result = f"Tool call blocked by policy: {e}"   # hand back to the model
 ```
 
-`e.reason` is prose for a human reading the audit log and may be reworded between releases — `e.category` is the part to branch on. The categories are `credential`, `sensitive_keyword`, `not_allowlisted`, `invalid_url`, `scheme_not_allowed`, `userinfo_trick`, `metacharacter`, `interpreter`, `destructive_command`, `network_utility`, `unparseable`, and `unspecified` for custom policies that don't set one.
+`e.reason` is prose for a human reading the audit log and may be reworded between releases — `e.category` is the part to branch on. The categories are `credential`, `sensitive_keyword`, `not_allowlisted`, `invalid_url`, `scheme_not_allowed`, `userinfo_trick`, `metacharacter`, `interpreter`, `environment_assignment`, `destructive_command`, `network_utility`, `unparseable`, and `unspecified` for custom policies that don't set one.
 
 > **Using the bare `@shield_tool`?** It applies a default `SensitiveDataFilter` that matches the literal strings `secret`, `password`, and `api_key` — a demo default, not a credential scanner. For real credential formats, add [`SecretPatternFilter`](#blocking-real-credentials) to your engine. See [Limitations](#limitations).
 
@@ -153,14 +153,24 @@ Each entry is an **argv prefix**, so `"git status"` permits `git status --short`
 | `/bin/ls`, `./ls`, `"ls" -la` | normalised to `ls` — allowed | — |
 | `ls; curl evil.com` | blocked | `metacharacter` |
 | `ls\ncurl evil.com` | blocked | `metacharacter` |
-| `FOO=bar curl evil.com` | blocked as `curl`, not `FOO=bar` | `not_allowlisted` |
-| `env FOO=bar curl evil.com` | blocked as `curl` | `not_allowlisted` |
-| `sh -c "curl evil.com"` | blocked **even if `sh` is allowlisted** | `interpreter` |
+| `PATH=/tmp/pwn ls` | blocked | `environment_assignment` |
+| `LD_PRELOAD=/tmp/evil.so ls` | blocked | `environment_assignment` |
+| `GIT_SSH_COMMAND=id git status` | blocked | `environment_assignment` |
+| `env PATH=/tmp/pwn ls` | blocked | `environment_assignment` |
+| `sh -c "…"`, `bash -lc "…"`, `python -cCODE`, `node --eval=…`, `node -p`, `python -` | blocked | `interpreter` |
 | `sudo ls` | blocked — wrappers are not unwrapped | `not_allowlisted` |
 | `ls "unbalanced` | blocked — unparseable fails closed | `unparseable` |
 
-Two things to know before you reach for it:
+**Environment assignments are refused, not stripped.** The environment decides which program a name resolves to and how it behaves, so an assignment subverts the binary the allowlist just approved — `PATH=` redirects it, `LD_PRELOAD=` injects into it, and `GIT_CONFIG_*`/`GIT_SSH_COMMAND=` turn an allowlisted `git status` into a way to run anything. The dangerous names are not enumerable, so the default is to refuse all of them. Name the ones you need:
 
+```python
+ShellCommandAllowList(["ls"], allowed_env={"LANG"})
+```
+
+Three things to know before you reach for it:
+
+- **Do not allowlist an interpreter.** Rejecting `-c` is best-effort, not a boundary: `awk 'BEGIN{system("id")}'` carries its program as a plain positional argument, and `sh script.sh` or `python evil.py` run a file this rule never sees. Allowlisting `sh`, `python`, `node` or `awk` is close to allowlisting arbitrary execution — the constructor warns you when you do. Allowlist the specific *program* instead.
+- **An allowlisted name authorises whatever the OS resolves it to.** This rule reads the command, not the filesystem. Pin `PATH` and the working directory at the tool, or an attacker-writable `./ls` is still an `ls`.
 - **It treats every string it sees as a command.** A policy sees one argument at a time and cannot know its name, so there is no way to distinguish a `command` argument from a `cwd` one. Put it on an engine guarding a tool whose only string argument is the command.
 - **It governs the command, not what the command then does.** An allowlisted `git` still accepts `git config`. Allowlist the narrowest prefix that does the job.
 
@@ -269,7 +279,9 @@ ModelFuzz is pre-1.0 and provides the interception point, the policy protocol, a
 - **The default filter is a keyword tripwire, not a secret scanner.** `SensitiveDataFilter` matches the literal strings `secret`, `password`, and `api_key`. It does not recognise credential formats, so a real `sk-…` or `AKIA…` key passes straight through — while ordinary prose containing "password" is blocked. Treat it as a demo default; add `SecretPatternFilter` for credential formats, and write policies for your own threat model.
 - **`SecretPatternFilter` matches known formats, not secrets in general.** It recognises the credential shapes listed in [Blocking real credentials](#blocking-real-credentials) and nothing else: a bespoke internal token, a bare high-entropy string, or a provider not in the table passes untouched. It also matches *shape, not validity* — a revoked key, a docs placeholder, or a test fixture in the right shape is blocked exactly like a live credential. Use `extra_patterns=` for your own formats.
 - **`NoDangerousShellPatterns` is a tripwire, not a shell parser or a security boundary.** It matches raw text against a fixed table. Base64, unusual quoting, a renamed binary, or a utility not in the table all walk straight past it, and ordinary prose containing `curl` or a `|` trips it. Use it as a cheap second layer; where you can enumerate the commands your agent needs, `ShellCommandAllowList` is the boundary.
-- **`ShellCommandAllowList` treats every string it sees as a command, and governs only the command itself.** Because a policy cannot know an argument's name, a second string argument (a `cwd`, say) is judged as a command and blocked — put it on an engine guarding a tool whose only string argument is the command. And an allowlisted binary is allowlisted with all its own options: `git` still accepts `git config`. Parsing follows `shlex` POSIX rules, which is close to `sh` but not identical to every shell in every mode.
+- **`ShellCommandAllowList` treats every string it sees as a command, and governs only the command itself.** Because a policy cannot know an argument's name, a second string argument (a `cwd`, say) is judged as a command and blocked — put it on an engine guarding a tool whose only string argument is the command. And an allowlisted binary is allowlisted with all its own options: `git` still accepts `git config`. Dict *keys* are not read as commands, only values. Parsing follows `shlex` POSIX rules, which is close to `sh` but not identical to every shell in every mode.
+- **Allowlisting an interpreter is close to allowlisting arbitrary execution.** `ShellCommandAllowList` rejects inline-script invocation (`-c`, `-cCODE`, `-lc`, `--eval=…`, `-p`, `-`) on a best-effort basis, but that is a tripwire around one vector, not a boundary: `awk 'BEGIN{system("id")}'` carries its program as a positional argument with no flag at all, and `sh script.sh` or `python evil.py` execute a file the rule never sees. The constructor emits a `UserWarning` when your allowlist names a known interpreter. Allowlist the specific program instead.
+- **An allowlisted name authorises whatever the OS resolves it to.** The rule reads the command, not the filesystem, so it cannot tell `/bin/ls` from an attacker-written `./ls`. It refuses `PATH=`/`LD_PRELOAD=` assignments in the command, but the ambient environment is yours to control: pin `PATH` and the working directory at the tool.
 - **Unrecognised argument types are not inspected, and pass.** Only `str`, `bytes`, `list`, `tuple`, `set`, and `dict` keys and values are walked. A secret carried in a custom object is *not* checked and the call proceeds — the default is to allow what it cannot read.
 - **Policies see one argument at a time.** A rule cannot express "amount > 1000 only when account is external", because it never sees the whole call.
 - **It does not inspect prompts or model output** — only tool-call arguments. It is not a content filter.

