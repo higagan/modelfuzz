@@ -329,7 +329,13 @@ class TestSecretPatternFilter:
             ("OpenAI API key", "sk-proj-" + "A1b2C3d4E5" * 3),
             ("Stripe secret key", "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"),
             ("AWS access key ID", "AKIAIOSFODNN7EXAMPLE"),
-            ("AWS access key ID", "ASIAIOSFODNN7EXAMPLE"),
+            # Assembled rather than written out. AKIAIOSFODNN7EXAMPLE is AWS's
+            # own documentation placeholder and every scanner knows it, but the
+            # ASIA (temporary credential) variant is on nobody's allowlist, and
+            # GitHub secret scanning flagged the literal here as a possible live
+            # key. It never was one -- which is precisely the "matches shape,
+            # not validity" limit this rule documents about itself.
+            ("AWS access key ID", "ASIA" + "IOSFODNN7EXAMPLE"),
             ("GitHub token", "ghp_" + "b" * 36),
             ("GitHub fine-grained token", "github_pat_" + "c" * 30),
             ("Google API key", "AIza" + "D" * 35),
