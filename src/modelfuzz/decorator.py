@@ -56,6 +56,38 @@ def shield_tool(
     return decorator
 
 
+@functools.cache
+def _declared_parameters(func: Callable[..., object]) -> frozenset[str]:
+    """Parameter names the tool author wrote in the signature.
+
+    Cached: the signature cannot change between calls, and introspecting it on
+    every invocation would put ``inspect`` on the hot path of every tool call.
+    """
+    try:
+        return frozenset(inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        # Some builtins and C callables have no introspectable signature. Treat
+        # every key as undeclared, which checks more rather than less.
+        return frozenset()
+
+
+def _undeclared_keys(func: Callable[..., object], kwargs: dict[str, Any]) -> list[str]:
+    """Keyword names that arrived through ``**kwargs`` rather than the signature.
+
+    A tool declaring ``**params`` lets the caller choose the *names*, so for such
+    a tool the key is attacker-controlled data and has to be checked -- a URL or
+    a credential sitting in a key was reaching the body untouched, while the same
+    dict passed as a value was blocked.
+
+    Declared names are excluded on purpose. They are chosen by the tool author,
+    not the model, and checking them would make the bundled
+    ``SensitiveDataFilter`` block any tool that simply has a parameter called
+    ``password`` or ``api_key``.
+    """
+    declared = _declared_parameters(func)
+    return [key for key in kwargs if key not in declared]
+
+
 def _enforce(
     func: Callable[..., object],
     actual_engine: PolicyEngine,
@@ -69,7 +101,7 @@ def _enforce(
     transport for MCP stdio servers, and a stray write there corrupts the
     JSON-RPC stream.
     """
-    for arg in list(args) + list(kwargs.values()):
+    for arg in list(args) + list(kwargs.values()) + _undeclared_keys(func, kwargs):
         result = actual_engine.run(arg)
         if result.allowed:
             continue
