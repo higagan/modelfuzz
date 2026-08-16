@@ -85,6 +85,67 @@ def _iter_strings(data: object, seen: set[int]) -> Iterator[str]:
 
 DEFAULT_URL_SCHEMES = frozenset({"http", "https"})
 
+# A scheme is a letter followed by at least one more scheme character. Requiring
+# two rules out a Windows drive letter, so "C:\\Users\\bob" stays a path.
+_SCHEME_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]+:")
+
+# Legal hostname characters. Anything else -- NUL, space, tab, a control byte --
+# means the string is not a hostname and must not be suffix-matched against the
+# allowlist.
+_HOSTNAME_CHARS = re.compile(r"[A-Za-z0-9.\-]+")
+
+# Schemes whose payload is opaque rather than hierarchical: there is no "//" to
+# key on, but a consumer still acts on them. Without these, "javascript:..." and
+# "data:text/html,..." read as ordinary text.
+_OPAQUE_ACTIONABLE_SCHEMES = frozenset(
+    {"data", "javascript", "vbscript", "mailto", "tel", "blob", "jar", "view-source"}
+)
+
+
+def _looks_like_url(value: str) -> bool:
+    """Is this string claiming to be a URL?
+
+    The rule governs URLs only, so it must answer this before it can default-deny
+    -- and answering it wrong in the permissive direction is a silent bypass.
+
+    This used to test ``"://" in value``, which is true only of the
+    authority-bearing spelling. Every other form a real client resolves was
+    therefore classified "not a URL" and allowed: ``http:/evil.com`` (one slash,
+    which curl and the WHATWG parsers resolve to evil.com), ``file:/etc/passwd``,
+    ``javascript:``, ``data:``, and protocol-relative ``//evil.com``.
+
+    A string qualifies when it carries no whitespace and either begins with the
+    protocol-relative ``//`` or opens with a scheme followed by a hierarchical
+    path or an opaque-but-actionable scheme. The whitespace and two-character
+    scheme requirements are what keep ordinary prose out: "Note: deploy failed"
+    has a space, "C:\\Users" has a one-letter scheme, and "key:value" is opaque
+    under an unknown scheme.
+    """
+    if not value:
+        return False
+
+    # The original signal, kept exactly: an authority-bearing URL is a URL, even
+    # if it carries whitespace. Narrowing this would turn "http://evil.com/a b"
+    # -- blocked today -- into an allowed string.
+    if "://" in value:
+        return True
+
+    # Below here the form is ambiguous, so whitespace is what separates a URL
+    # from prose that happens to contain a colon.
+    if any(char.isspace() for char in value):
+        return False
+
+    if value.startswith("//"):
+        return True
+
+    match = _SCHEME_PREFIX.match(value)
+    if not match:
+        return False
+
+    remainder = value[match.end() :]
+    scheme = match.group()[:-1].lower()
+    return remainder.startswith("/") or scheme in _OPAQUE_ACTIONABLE_SCHEMES
+
 
 class URLAllowList:
     """A policy that ensures URLs are on an allowlist and blocks parsing tricks.
@@ -132,6 +193,12 @@ class URLAllowList:
         if isinstance(data, str):
             return self._check_url(data)
 
+        # bytes are a URL carrier like any other. Omitting this branch made a
+        # bytes argument skip every check in this rule -- host allowlist, scheme
+        # allowlist, userinfo, and the fail-closed path -- silently.
+        if isinstance(data, (bytes, bytearray)):
+            return self._check_url(data.decode("utf-8", errors="ignore"))
+
         if isinstance(data, (dict, list, tuple, set, frozenset)):
             # Guard against self-referential containers, which a hand-built
             # argument can contain even though JSON-derived ones cannot.
@@ -149,34 +216,48 @@ class URLAllowList:
         return None
 
     def _check_url(self, url: str) -> Violation | None:
-        # A string carrying a scheme separator is claiming to be a URL, so a
-        # parse failure from here on must fail closed rather than sail through.
-        looks_like_url = "://" in url
+        if not _looks_like_url(url):
+            return None
 
+        # From here the string is claiming to be a URL, so every failure below
+        # must fail closed rather than sail through as "not my business".
         try:
             parsed = urlparse(url)
         except Exception:
-            return self._invalid(url) if looks_like_url else None
+            return self._invalid()
 
-        if not parsed.scheme or not parsed.netloc:
-            return self._invalid(url) if looks_like_url else None
-
-        if parsed.scheme.lower() not in self.allowed_schemes:
+        # The scheme is checked BEFORE the authority. An opaque or single-slash
+        # URL has no netloc, and testing that first is what let file:/etc/passwd
+        # and javascript:... escape the scheme allowlist entirely.
+        if parsed.scheme and parsed.scheme.lower() not in self.allowed_schemes:
             return self._block(
                 f"URL scheme not allowed: {parsed.scheme}", CATEGORY_SCHEME_NOT_ALLOWED
             )
 
-        # Block userinfo tricks (e.g., http://api.internal.com@evil.com)
+        if not parsed.netloc:
+            return self._invalid()
+
+        # Block userinfo tricks (e.g., http://api.internal.com@evil.com).
+        # The reason names no part of the URL: userinfo is where basic-auth
+        # credentials live, and this reason is written to the audit log.
         if "@" in parsed.netloc:
-            return self._block(f"URL contains userinfo trick: {url}", CATEGORY_USERINFO_TRICK)
+            return self._block("URL contains userinfo trick", CATEGORY_USERINFO_TRICK)
 
         try:
             hostname = (parsed.hostname or "").rstrip(".")
         except ValueError:
-            return self._invalid(url)
+            return self._invalid()
 
         if not hostname:
-            return self._invalid(url)
+            return self._invalid()
+
+        # A hostname is letters, digits, hyphens and dots. Without this, a NUL,
+        # space or tab inside a label still satisfies the endswith() suffix
+        # match below -- "evil.com\x00.api.internal.com" reads as a subdomain of
+        # the allowlisted zone, while getaddrinfo and curl truncate at the NUL
+        # and connect to evil.com.
+        if not _HOSTNAME_CHARS.fullmatch(hostname):
+            return self._invalid()
 
         # Check for exact match or valid subdomain
         is_allowed = any(
@@ -194,8 +275,12 @@ class URLAllowList:
         return Violation(rule_name="URLAllowList", reason=reason, category=category)
 
     @classmethod
-    def _invalid(cls, url: str) -> Violation:
-        return cls._block(f"Invalid URL: {url}", CATEGORY_INVALID_URL)
+    def _invalid(cls) -> Violation:
+        # Deliberately quotes nothing. The rejected string is attacker-supplied
+        # and this reason reaches a WARNING log and the exception message: a URL
+        # carries credentials in its userinfo and query string, and control
+        # characters in it can forge log lines.
+        return cls._block("Invalid URL", CATEGORY_INVALID_URL)
 
 
 class SensitiveDataFilter:
@@ -257,9 +342,12 @@ DEFAULT_SECRET_PATTERNS: tuple[tuple[str, str], ...] = (
     ("AWS access key ID", r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"),
     ("GitHub fine-grained token", r"\bgithub_pat_[A-Za-z0-9_]{22,}"),
     ("GitHub token", r"\bgh[pousr]_[A-Za-z0-9]{36,}"),
-    ("Google API key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
-    ("Slack token", r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
-    ("JSON Web Token", r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+"),
+    ("Google API key", r"\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])"),
+    ("Slack token", r"\b(?:xox[abprse]|xapp)-[A-Za-z0-9-]{10,}"),
+    (
+        "JSON Web Token",
+        r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+",
+    ),
     ("private key block", r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----"),
 )
 

